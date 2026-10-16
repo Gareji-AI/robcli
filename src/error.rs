@@ -10,6 +10,8 @@ pub(crate) struct AppError {
     pub http_status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
     #[serde(skip)]
     pub hint: &'static str,
     #[serde(skip)]
@@ -23,6 +25,7 @@ impl AppError {
             message,
             http_status: None,
             retry_after_seconds: None,
+            details: None,
             hint,
             exit_code: 2,
         }

@@ -1,13 +1,14 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "rob",
     version,
-    about = "Read-only Roblox Creator Dashboard CLI"
+    about = "Session-backed Roblox Creator Dashboard CLI"
 )]
 #[command(
-    after_help = "Offline by default. --live permits one bounded read-only probe.\nNo API-key, OAuth, cookie-export, or write commands are supported."
+    after_help = "Offline by default. --live permits one explicitly approved bounded operation.\nAPI-key/OAuth authentication and cookie export are not supported. Key creation is plan-only unless --apply and account confirmation are supplied."
 )]
 pub(crate) struct Cli {
     /// Explicitly allow one bounded live probe. Never use in a test loop.
@@ -35,10 +36,31 @@ pub(crate) enum Command {
     },
     /// Show the signed-in Roblox account. Alias of auth check.
     Whoami,
-    /// Inspect user-owned experiences. Group-owned experiences are not included.
+    /// Inspect the signed-in user's groups and roles.
+    Groups {
+        #[command(subcommand)]
+        command: GroupCommand,
+    },
+    /// Inspect personal or explicitly selected group-owned experiences.
     Experiences {
         #[command(subcommand)]
         command: ExperienceCommand,
+    },
+    /// Print Dashboard destinations without opening a browser or reading cookies.
+    Dashboard {
+        #[command(subcommand)]
+        command: DashboardCommand,
+    },
+    /// Administer API-key metadata using the Dashboard session, not API-key auth.
+    #[command(name = "apikey")]
+    ApiKey {
+        #[command(subcommand)]
+        command: ApiKeyCommand,
+    },
+    /// Export one chart through the Dashboard's existing Download CSV action.
+    Analytics {
+        #[command(subcommand)]
+        command: AnalyticsCommand,
     },
     /// Discover the supported commands and safety limits without reading cookies.
     Schema,
@@ -49,10 +71,71 @@ impl Command {
         match self {
             Self::Auth { .. } => "auth check",
             Self::Whoami => "whoami",
-            Self::Experiences { .. } => "experiences list",
+            Self::Groups { .. } => "groups list",
+            Self::Experiences {
+                command: ExperienceCommand::List { .. },
+            } => "experiences list",
+            Self::Experiences {
+                command: ExperienceCommand::Settings { .. },
+            } => "experiences settings",
+            Self::Dashboard { .. } => "dashboard links",
+            Self::ApiKey {
+                command: ApiKeyCommand::List { .. },
+            } => "apikey list",
+            Self::ApiKey {
+                command: ApiKeyCommand::Create { .. },
+            } => "apikey create",
+            Self::Analytics { .. } => "analytics export",
             Self::Schema => "schema",
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AnalyticsCommand {
+    /// A single owned private Firefox page load and one CSV click; never an internal-query guess.
+    Export {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        chart: String,
+        #[arg(long)]
+        output: PathBuf,
+        /// Path to Mozilla geckodriver. Otherwise use the OS-local robcli tools directory or PATH.
+        #[arg(long)]
+        driver: Option<PathBuf>,
+        /// Consent to normal browser page assets/XHR, outside the direct-API HTTP cap.
+        #[arg(long)]
+        allow_browser_page_load: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ApiKeyCommand {
+    /// Plan key issuance offline; --apply additionally requires --live and --confirm-user.
+    Create {
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        secret_name: String,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        confirm_user: Option<u64>,
+        /// Explicitly permit one CSRF token-validation replay only.
+        #[arg(long)]
+        allow_csrf_handshake: bool,
+    },
+    /// List key metadata only. The Dashboard uses a read-only POST for this.
+    List {
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        group: Option<u64>,
+        #[arg(long)]
+        all: bool,
+        /// Permit one 403 token-validation replay, never a challenge bypass.
+        #[arg(long)]
+        allow_csrf_handshake: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -62,9 +145,25 @@ pub(crate) enum AuthCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub(crate) enum GroupCommand {
+    /// List groups and the account's roles; membership is not an admin grant.
+    List,
+}
+
+#[derive(Debug, Subcommand)]
 pub(crate) enum ExperienceCommand {
+    /// Read settings only after the selected owner matches the experience.
+    Settings {
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        universe: u64,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        group: Option<u64>,
+    },
     /// List non-archived user-owned experiences unless --archived is selected.
     List {
+        /// Select a group explicitly instead of the personal collection.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        group: Option<u64>,
         /// Follow pagination, stopping at the shared development traffic budget.
         #[arg(long)]
         all: bool,
@@ -76,5 +175,15 @@ pub(crate) enum ExperienceCommand {
         /// Results per page. Not the maximum request count.
         #[arg(long, default_value = "100", value_parser = ["10", "25", "50", "100"])]
         limit: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum DashboardCommand {
+    Links {
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        universe: u64,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        group: Option<u64>,
     },
 }

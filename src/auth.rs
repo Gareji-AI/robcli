@@ -62,6 +62,12 @@ impl fmt::Debug for SessionCookie {
 }
 
 impl SessionCookie {
+    /// Only the isolated browser adapter uses the raw value. Never log it or
+    /// pass a real Firefox profile to WebDriver.
+    pub fn browser_value(&self) -> &str {
+        self.0.as_str()
+    }
+
     fn new(value: String) -> Result<Self, AppError> {
         let secret = Zeroizing::new(value);
         if secret.is_empty()

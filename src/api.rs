@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::auth::SessionCookie;
 use crate::error::AppError;
 use crate::traffic::{Clock, TrafficGuard};
-use crate::transport::{ReadRequest, Transport};
+use crate::transport::{HttpResponse, Request, Transport};
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +52,32 @@ pub(crate) struct Collection {
     pub count: usize,
     has_more: bool,
     experiences: Vec<Experience>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct GroupEntry {
+    group: GroupInfo,
+    role: GroupRole,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct GroupInfo {
+    id: u64,
+    name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct GroupRole {
+    id: u64,
+    name: String,
+    rank: u32,
+}
+
+#[derive(Deserialize)]
+struct Groups {
+    data: Vec<GroupEntry>,
 }
 
 pub(crate) struct ListOptions<'a> {
@@ -63,11 +89,22 @@ pub(crate) struct ListOptions<'a> {
 pub(crate) struct Api<T: Transport> {
     pub transport: T,
     cookie: SessionCookie,
+    csrf: Option<reqwest::header::HeaderValue>,
+    csrf_replayed: bool,
 }
 
 impl<T: Transport> Api<T> {
+    pub fn into_cookie(self) -> SessionCookie {
+        self.cookie
+    }
+
     pub fn new(transport: T, cookie: SessionCookie) -> Self {
-        Self { transport, cookie }
+        Self {
+            transport,
+            cookie,
+            csrf: None,
+            csrf_replayed: false,
+        }
     }
 
     fn read<R: DeserializeOwned, C: Clock>(
@@ -75,9 +112,19 @@ impl<T: Transport> Api<T> {
         url: Url,
         guard: &mut TrafficGuard<C>,
     ) -> Result<R, AppError> {
-        let request = ReadRequest::new(url, self.cookie.header()?)?;
+        let request = Request::new(url, self.cookie.header()?)?;
         guard.reserve()?;
-        let response = self.transport.get(request)?;
+        let response = self.transport.send(request)?;
+        Self::decode(&response)
+    }
+
+    fn decode<R: DeserializeOwned>(response: &HttpResponse) -> Result<R, AppError> {
+        if response.challenge {
+            return Err(AppError::network(
+                "interactive_challenge_required",
+                "Roblox requested additional authentication. No challenge bypass was attempted.",
+            ));
+        }
         if !(200..300).contains(&response.status) {
             let code = match response.status {
                 300..=399 => "redirect_refused",
@@ -103,6 +150,98 @@ impl<T: Transport> Api<T> {
         })
     }
 
+    pub fn key_post<R: DeserializeOwned, C: Clock>(
+        &mut self,
+        create: bool,
+        body: serde_json::Value,
+        allow_csrf: bool,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<R, AppError> {
+        loop {
+            let request = Request::key_post(
+                create,
+                body.clone(),
+                self.cookie.header()?,
+                self.csrf.clone(),
+            )?;
+            guard.reserve()?;
+            let response = match self.transport.send(request) {
+                Ok(response) => response,
+                Err(error) if create => return Err(unknown_creation(error.http_status)),
+                Err(error) => return Err(error),
+            };
+            if response.challenge {
+                return Err(AppError::network(
+                    "interactive_challenge_required",
+                    "Roblox requested additional authentication. No challenge bypass was attempted.",
+                ));
+            }
+            if response.status == 403 && response.csrf.is_some() {
+                if allow_csrf && !self.csrf_replayed {
+                    self.csrf = response.csrf.clone();
+                    self.csrf_replayed = true;
+                    continue;
+                }
+                return Err(AppError::new(
+                    "csrf_required",
+                    "Roblox refused the request with a CSRF challenge.",
+                    "An explicitly requested --allow-csrf-handshake permits one token-validation replay only; no other retry or authentication bypass is allowed.",
+                ));
+            }
+            if create
+                && ((300..400).contains(&response.status)
+                    || response.status == 408
+                    || response.status == 429
+                    || response.status >= 500)
+            {
+                return Err(unknown_creation(Some(response.status)));
+            }
+            match Self::decode(&response) {
+                Ok(value) => return Ok(value),
+                Err(_) if create && (200..300).contains(&response.status) => {
+                    return Err(unknown_creation(Some(response.status)));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    pub fn keys<C: Clock>(
+        &mut self,
+        group: Option<u64>,
+        all: bool,
+        allow_csrf: bool,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<serde_json::Value, AppError> {
+        let mut keys = Vec::new();
+        let mut cursor = String::new();
+        let mut seen = HashSet::new();
+        loop {
+            let mut body = serde_json::json!({ "cursor": cursor, "limit": 100, "reverse": false });
+            if let Some(group) = group {
+                body["groupId"] = group.into();
+            }
+            let page: KeyPage = self.key_post(false, body, allow_csrf, guard)?;
+            for key in page.cloud_auth_info {
+                let props = key.cloud_auth_user_configured_properties;
+                keys.push(serde_json::json!({ "id": key.id, "ownerId": key.owner_id, "ownerType": key.owner_type,
+                    "name": props.as_ref().and_then(|p| p.name.as_deref()), "isEnabled": props.as_ref().and_then(|p| p.is_enabled),
+                    "expirationTime": props.as_ref().and_then(|p| p.expiration_time.as_deref()) }));
+            }
+            cursor = page.next_cursor.unwrap_or_default();
+            if !cursor.is_empty() && (!seen.insert(cursor.clone()) || cursor.len() > 4096) {
+                return Err(AppError::network(
+                    "pagination_stopped",
+                    "Key pagination is incomplete or repeated.",
+                ));
+            }
+            if !all || cursor.is_empty() {
+                break;
+            }
+        }
+        Ok(serde_json::json!({ "keys": keys, "groupId": group, "hasMore": !cursor.is_empty() }))
+    }
+
     pub fn whoami<C: Clock>(&mut self, guard: &mut TrafficGuard<C>) -> Result<User, AppError> {
         let user: User = self.read(
             Url::parse("https://users.roblox.com/v1/users/authenticated").unwrap(),
@@ -122,6 +261,120 @@ impl<T: Transport> Api<T> {
         options: ListOptions<'_>,
         guard: &mut TrafficGuard<C>,
     ) -> Result<Collection, AppError> {
+        self.collection(options, None, guard)
+    }
+
+    pub fn groups<C: Clock>(
+        &mut self,
+        user_id: u64,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<Vec<GroupEntry>, AppError> {
+        let groups: Groups = self.read(
+            Url::parse(&format!(
+                "https://groups.roblox.com/v2/users/{user_id}/groups/roles"
+            ))
+            .unwrap(),
+            guard,
+        )?;
+        Ok(groups.data)
+    }
+
+    pub fn settings<C: Clock>(
+        &mut self,
+        universe: u64,
+        user: u64,
+        group: Option<u64>,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<serde_json::Value, AppError> {
+        let info: serde_json::Value = self.read(
+            Url::parse(&format!(
+                "https://develop.roblox.com/v1/universes/{universe}"
+            ))
+            .unwrap(),
+            guard,
+        )?;
+        let (kind, owner) = group.map(|id| ("Group", id)).unwrap_or(("User", user));
+        if info["id"].as_u64() != Some(universe)
+            || info["creatorType"].as_str() != Some(kind)
+            || info["creatorTargetId"].as_u64() != Some(owner)
+        {
+            return Err(AppError::new(
+                "experience_owner_mismatch",
+                "The experience does not match the explicitly selected owner.",
+                "Select the correct --group and --universe. No settings query or owner fallback was attempted.",
+            ));
+        }
+        let raw: serde_json::Value = self.read(
+            Url::parse(&format!(
+                "https://develop.roblox.com/v1/universes/{universe}/configuration"
+            ))
+            .unwrap(),
+            guard,
+        )?;
+        if raw["id"].as_u64() != Some(universe) {
+            return Err(AppError::network(
+                "configuration_target_mismatch",
+                "The configuration did not identify the selected experience.",
+            ));
+        }
+        // Positive projection from the published UniverseSettingsResponse schema.
+        // Unknown future fields, including any unexpected secret field, are not echoed.
+        const FIELDS: &[&str] = &[
+            "id",
+            "name",
+            "promotionalText",
+            "allowPrivateServers",
+            "privateServerPrice",
+            "isMeshTextureApiAccessAllowed",
+            "isRewardedOnDemandAdsAllowed",
+            "universeAvatarType",
+            "universeScaleType",
+            "universeAnimationType",
+            "universeCollisionType",
+            "universeBodyType",
+            "universeJointPositioningType",
+            "isArchived",
+            "isFriendsOnly",
+            "genre",
+            "playableDevices",
+            "isForSale",
+            "price",
+            "isStudioAccessToApisAllowed",
+            "privacyType",
+            "isForSaleInFiat",
+            "fiatBasePriceId",
+            "fiatModerationStatus",
+            "audiences",
+            "demoModeEnabled",
+            "demoModeChangeableAfter",
+        ];
+        let settings: serde_json::Map<String, serde_json::Value> = FIELDS
+            .iter()
+            .filter_map(|key| {
+                raw.get(*key)
+                    .map(|value| ((*key).to_owned(), value.clone()))
+            })
+            .collect();
+        let mut output = crate::dashboard::links(universe, group);
+        output["settings"] = serde_json::Value::Object(settings);
+        Ok(output)
+    }
+
+    pub fn group_experiences<C: Clock>(
+        &mut self,
+        group: u64,
+        options: ListOptions<'_>,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<Collection, AppError> {
+        self.collection(options, Some(group), guard)
+    }
+
+    fn collection<C: Clock>(
+        &mut self,
+        options: ListOptions<'_>,
+        group: Option<u64>,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<Collection, AppError> {
         if !["10", "25", "50", "100"].contains(&options.limit) {
             return Err(AppError::new(
                 "invalid_limit",
@@ -133,7 +386,13 @@ impl<T: Transport> Api<T> {
         let mut cursor: Option<String> = None;
         let mut seen = HashSet::new();
         loop {
-            let mut url = Url::parse("https://develop.roblox.com/v1/user/universes").unwrap();
+            let mut url = match group {
+                Some(id) => Url::parse(&format!(
+                    "https://develop.roblox.com/v1/groups/{id}/universes"
+                ))
+                .unwrap(),
+                None => Url::parse("https://develop.roblox.com/v1/user/universes").unwrap(),
+            };
             {
                 let mut query = url.query_pairs_mut();
                 query.append_pair(
@@ -180,13 +439,52 @@ impl<T: Transport> Api<T> {
             }
         }
         Ok(Collection {
-            scope: "user-owned",
+            scope: if group.is_some() {
+                "group-owned"
+            } else {
+                "user-owned"
+            },
             archived: options.archived,
             count: experiences.len(),
             has_more: cursor.is_some(),
             experiences,
+            group_id: group,
         })
     }
+}
+
+fn unknown_creation(status: Option<u16>) -> AppError {
+    let mut error = AppError::network(
+        "creation_outcome_unknown",
+        "Key creation may have succeeded. No request was retried.",
+    );
+    error.http_status = status;
+    error.hint = "Inspect the Dashboard's key list before doing anything else. Do not resubmit create, rotate credentials, or delete a reserved secret file to force another attempt.";
+    error
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyPage {
+    cloud_auth_info: Vec<KeyMeta>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyMeta {
+    id: String,
+    owner_id: Option<u64>,
+    owner_type: Option<String>,
+    cloud_auth_user_configured_properties: Option<KeyProperties>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyProperties {
+    name: Option<String>,
+    is_enabled: Option<bool>,
+    expiration_time: Option<String>,
 }
 
 #[cfg(test)]
@@ -197,16 +495,17 @@ mod tests {
 
     use super::*;
     use crate::traffic::tests::FakeClock;
-    use crate::transport::HttpResponse;
 
     #[derive(Default)]
     struct FakeTransport {
         replies: VecDeque<HttpResponse>,
         requests: Vec<Url>,
+        records: Vec<serde_json::Value>,
     }
 
     impl Transport for FakeTransport {
-        fn get(&mut self, request: ReadRequest) -> Result<HttpResponse, AppError> {
+        fn send(&mut self, request: Request) -> Result<HttpResponse, AppError> {
+            self.records.push(request.snapshot());
             self.requests.push(request.url().clone());
             Ok(self
                 .replies
@@ -219,6 +518,8 @@ mod tests {
         HttpResponse {
             status: 200,
             retry_after_seconds: None,
+            csrf: None,
+            challenge: false,
             body: serde_json::to_vec(&value).unwrap(),
         }
     }
@@ -251,6 +552,170 @@ mod tests {
             api.transport.requests[0].as_str(),
             "https://users.roblox.com/v1/users/authenticated"
         );
+    }
+
+    #[test]
+    fn group_selection_uses_the_verified_group_route_and_explicit_scope() {
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut api = api(vec![page(1, None)]);
+        let output = api
+            .group_experiences(
+                42,
+                ListOptions {
+                    all: false,
+                    archived: true,
+                    limit: "25",
+                },
+                &mut guard,
+            )
+            .unwrap();
+        assert_eq!(output.scope, "group-owned");
+        assert_eq!(output.group_id, Some(42));
+        assert_eq!(api.transport.requests[0].path(), "/v1/groups/42/universes");
+        assert!(
+            api.transport.requests[0]
+                .query_pairs()
+                .any(|(k, v)| k == "isArchived" && v == "true")
+        );
+    }
+
+    #[test]
+    fn settings_are_read_only_after_the_explicit_owner_matches() {
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut api = api(vec![
+            response(
+                json!({ "id": 77, "name": "Mock", "creatorType": "Group", "creatorTargetId": 42 }),
+            ),
+            response(
+                json!({ "id": 77, "name": "Mock", "privateServerPrice": 0, "apikeySecret": "must-not-appear" }),
+            ),
+        ]);
+        let output = api.settings(77, 1, Some(42), &mut guard).unwrap();
+        assert_eq!(
+            api.transport.requests[1].path(),
+            "/v1/universes/77/configuration"
+        );
+        assert_eq!(output["settings"]["privateServerPrice"], 0);
+        assert!(output["settings"].get("apikeySecret").is_none());
+        assert_eq!(
+            output["settingsUrl"],
+            "https://create.roblox.com/dashboard/creations/experiences/77/configure?groupId=42"
+        );
+    }
+
+    #[test]
+    fn key_listing_projects_metadata_without_secret_or_preview() {
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut api = api(vec![response(json!({
+            "cloudAuthInfo": [{ "id": "key-id", "apikeySecret": "never-output", "apikeySecretPreview": "never-output", "cloudAuthUserConfiguredProperties": { "name": "analytics-read", "isEnabled": true } }],
+            "nextCursor": null
+        }))]);
+        let output = api.keys(Some(42), false, false, &mut guard).unwrap();
+        assert_eq!(output["keys"][0]["id"], "key-id");
+        assert!(!output.to_string().contains("never-output"));
+        assert_eq!(
+            api.transport.requests[0].path(),
+            "/cloud-authentication/v1/apiKeys"
+        );
+        assert_eq!(api.transport.records[0]["method"], "POST");
+        assert_eq!(
+            api.transport.records[0]["body"],
+            json!({ "cursor": "", "limit": 100, "reverse": false, "groupId": 42 })
+        );
+    }
+
+    fn csrf() -> HttpResponse {
+        let mut value = reqwest::header::HeaderValue::from_static("synthetic-csrf");
+        value.set_sensitive(true);
+        HttpResponse {
+            status: 403,
+            retry_after_seconds: None,
+            csrf: Some(value),
+            challenge: false,
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn csrf_exchange_is_explicit_and_capped_at_one_replay() {
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut refused = api(vec![csrf()]);
+        assert_eq!(
+            refused
+                .keys(None, false, false, &mut guard)
+                .unwrap_err()
+                .code,
+            "csrf_required"
+        );
+        assert_eq!(refused.transport.requests.len(), 1);
+        drop(guard);
+
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut allowed = api(vec![
+            csrf(),
+            response(json!({ "cloudAuthInfo": [], "nextCursor": null })),
+        ]);
+        allowed.keys(None, false, true, &mut guard).unwrap();
+        assert_eq!(allowed.transport.requests.len(), 2);
+        assert_eq!(allowed.transport.records[0]["csrfAttached"], false);
+        assert_eq!(allowed.transport.records[1]["csrfAttached"], true);
+        assert_eq!(
+            allowed.transport.records[0]["body"],
+            allowed.transport.records[1]["body"]
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut twice = api(vec![csrf(), csrf()]);
+        assert_eq!(
+            twice.keys(None, false, true, &mut guard).unwrap_err().code,
+            "csrf_required"
+        );
+        assert_eq!(twice.transport.requests.len(), 2);
+    }
+
+    #[test]
+    fn auth_challenges_are_not_replayed_and_uncertain_creation_is_not_retried() {
+        for status in [302, 408, 429, 500, 503] {
+            let root = tempfile::tempdir().unwrap();
+            let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+            let mut reply = response(json!({}));
+            reply.status = status;
+            let mut api = api(vec![reply]);
+            let result: Result<crate::keys::Created, _> =
+                api.key_post(true, json!({}), true, &mut guard);
+            assert_eq!(result.err().unwrap().code, "creation_outcome_unknown");
+            assert_eq!(api.transport.requests.len(), 1);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut challenge = csrf();
+        challenge.challenge = true;
+        let mut api = api(vec![challenge]);
+        assert_eq!(
+            api.keys(None, false, true, &mut guard).unwrap_err().code,
+            "interactive_challenge_required"
+        );
+        assert_eq!(api.transport.requests.len(), 1);
+    }
+
+    #[test]
+    fn wrong_group_stops_before_reading_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut api = api(vec![response(
+            json!({ "id": 77, "creatorType": "Group", "creatorTargetId": 99 }),
+        )]);
+        assert_eq!(
+            api.settings(77, 1, Some(42), &mut guard).unwrap_err().code,
+            "experience_owner_mismatch"
+        );
+        assert_eq!(api.transport.requests.len(), 1);
     }
 
     #[test]
@@ -356,6 +821,8 @@ mod tests {
             let mut api = api(vec![HttpResponse {
                 status,
                 retry_after_seconds: Some(60),
+                csrf: None,
+                challenge: false,
                 body: b"sensitive-server-content".to_vec(),
             }]);
             let error = api.whoami(&mut guard).unwrap_err();
@@ -384,6 +851,8 @@ mod tests {
             let mut api = api(vec![HttpResponse {
                 status: 200,
                 retry_after_seconds: None,
+                csrf: None,
+                challenge: false,
                 body,
             }]);
             let error = api.whoami(&mut guard).unwrap_err();

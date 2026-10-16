@@ -1,28 +1,90 @@
 use std::io::Read;
 use std::time::Duration;
 
-use reqwest::Url;
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, COOKIE, HeaderValue, RETRY_AFTER};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderValue, RETRY_AFTER};
+use reqwest::{Method, Url};
+use zeroize::Zeroize;
 
 use crate::error::AppError;
 
 const MAX_BODY_BYTES: u64 = 2 * 1024 * 1024;
 
-pub(crate) struct ReadRequest {
+pub(crate) struct Request {
     url: Url,
     cookie: HeaderValue,
+    method: Method,
+    body: Option<serde_json::Value>,
+    csrf: Option<HeaderValue>,
 }
 
-impl ReadRequest {
+impl Request {
     pub fn new(url: Url, cookie: HeaderValue) -> Result<Self, AppError> {
+        Self::validate(&url)?;
+        let path = url.path();
+        let numeric = |prefix: &str, suffix: &str| {
+            path.strip_prefix(prefix)
+                .and_then(|value| value.strip_suffix(suffix))
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some_and(|id| id > 0)
+        };
+        let allowed = match url.host_str() {
+            Some("users.roblox.com") => path == "/v1/users/authenticated" && url.query().is_none(),
+            Some("groups.roblox.com") => numeric("/v2/users/", "/groups/roles"),
+            Some("develop.roblox.com") => {
+                path == "/v1/user/universes"
+                    || numeric("/v1/groups/", "/universes")
+                    || numeric("/v1/universes/", "")
+                    || numeric("/v1/universes/", "/configuration")
+            }
+            _ => false,
+        };
+        if !allowed {
+            return Err(blocked());
+        }
+        Ok(Self {
+            url,
+            cookie,
+            method: Method::GET,
+            body: None,
+            csrf: None,
+        })
+    }
+
+    pub fn key_post(
+        create: bool,
+        body: serde_json::Value,
+        cookie: HeaderValue,
+        csrf: Option<HeaderValue>,
+    ) -> Result<Self, AppError> {
+        let path = if create { "apiKey" } else { "apiKeys" };
+        let url = Url::parse(&format!(
+            "https://apis.roblox.com/cloud-authentication/v1/{path}"
+        ))
+        .unwrap();
+        Self::validate(&url)?;
+        Ok(Self {
+            url,
+            cookie,
+            method: Method::POST,
+            body: Some(body),
+            csrf,
+        })
+    }
+
+    fn validate(url: &Url) -> Result<(), AppError> {
         if url.scheme() != "https"
             || !url.username().is_empty()
             || url.password().is_some()
             || url.port().is_some()
             || !matches!(
                 url.host_str(),
-                Some("users.roblox.com" | "develop.roblox.com")
+                Some(
+                    "users.roblox.com"
+                        | "develop.roblox.com"
+                        | "groups.roblox.com"
+                        | "apis.roblox.com"
+                )
             )
         {
             return Err(AppError::new(
@@ -31,23 +93,45 @@ impl ReadRequest {
                 "Use a supported command. Arbitrary URLs, redirects, and API base-URL overrides are not supported.",
             ));
         }
-        Ok(Self { url, cookie })
+        Ok(())
     }
 
     #[cfg(test)]
     pub fn url(&self) -> &Url {
         &self.url
     }
+
+    #[cfg(test)]
+    pub fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({ "method": self.method.as_str(), "path": self.url.path(), "body": self.body,
+            "csrfAttached": self.csrf.is_some(), "cookieSensitive": self.cookie.is_sensitive() })
+    }
+}
+
+fn blocked() -> AppError {
+    AppError::new(
+        "destination_blocked",
+        "The request is not a supported Dashboard route.",
+        "Arbitrary endpoints, credentials in URLs, and authentication fallback are not supported.",
+    )
 }
 
 pub(crate) struct HttpResponse {
     pub status: u16,
     pub retry_after_seconds: Option<u64>,
     pub body: Vec<u8>,
+    pub csrf: Option<HeaderValue>,
+    pub challenge: bool,
+}
+
+impl Drop for HttpResponse {
+    fn drop(&mut self) {
+        self.body.zeroize();
+    }
 }
 
 pub(crate) trait Transport {
-    fn get(&mut self, request: ReadRequest) -> Result<HttpResponse, AppError>;
+    fn send(&mut self, request: Request) -> Result<HttpResponse, AppError>;
 }
 
 pub(crate) struct HttpsTransport {
@@ -79,20 +163,40 @@ fn client(https_only: bool) -> Result<Client, AppError> {
 }
 
 impl Transport for HttpsTransport {
-    fn get(&mut self, request: ReadRequest) -> Result<HttpResponse, AppError> {
-        let mut response = self
+    fn send(&mut self, request: Request) -> Result<HttpResponse, AppError> {
+        let mut builder = self
             .client
-            .get(request.url)
+            .request(request.method, request.url)
             .header(ACCEPT, "application/json")
-            .header(COOKIE, request.cookie)
-            .send()
-            .map_err(|_| {
-                AppError::network(
-                    "network_failed",
-                    "The read failed or timed out. No retry was attempted.",
-                )
-            })?;
+            .header(COOKIE, request.cookie);
+        if let Some(body) = request.body {
+            builder = builder.header(CONTENT_TYPE, "application/json").json(&body);
+        }
+        if let Some(csrf) = request.csrf {
+            builder = builder.header("x-csrf-token", csrf);
+        }
+        let mut response = builder.send().map_err(|_| {
+            AppError::network(
+                "network_failed",
+                "The read failed or timed out. No retry was attempted.",
+            )
+        })?;
         let status = response.status().as_u16();
+        let csrf = response
+            .headers()
+            .get("x-csrf-token")
+            .cloned()
+            .map(|mut value| {
+                value.set_sensitive(true);
+                value
+            });
+        let challenge = [
+            "rblx-challenge-id",
+            "rblx-challenge-type",
+            "rblx-challenge-metadata",
+        ]
+        .iter()
+        .any(|name| response.headers().contains_key(*name));
         let retry_after_seconds = response
             .headers()
             .get(RETRY_AFTER)
@@ -119,6 +223,8 @@ impl Transport for HttpsTransport {
             status,
             retry_after_seconds,
             body,
+            csrf,
+            challenge,
         })
     }
 }
@@ -141,7 +247,7 @@ mod tests {
             "https://user:pass@users.roblox.com/",
         ] {
             assert!(
-                ReadRequest::new(
+                Request::new(
                     Url::parse(url).unwrap(),
                     SessionCookie::synthetic().header().unwrap()
                 )
@@ -172,9 +278,12 @@ mod tests {
             client: client(false).unwrap(),
         };
         let response = transport
-            .get(ReadRequest {
+            .send(Request {
                 url,
                 cookie: SessionCookie::synthetic().header().unwrap(),
+                method: Method::GET,
+                body: None,
+                csrf: None,
             })
             .unwrap();
         assert_eq!(response.status, 302);

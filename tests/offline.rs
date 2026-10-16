@@ -59,6 +59,123 @@ fn all_account_commands_are_offline_unless_live_is_explicit() {
 }
 
 #[test]
+fn group_listing_is_available_but_offline_without_explicit_permission() {
+    let root = tempfile::tempdir().unwrap();
+    let output = run(root.path(), &["groups", "list"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json(&output)["error"]["code"], "live_not_enabled");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn key_creation_defaults_to_an_offline_plan_without_secret_or_browser_access() {
+    let root = tempfile::tempdir().unwrap();
+    let expiry = chrono::DateTime::<chrono::Utc>::from_timestamp(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 86400,
+        0,
+    )
+    .unwrap()
+    .to_rfc3339();
+    let request = root.path().join("key-plan.json");
+    std::fs::write(&request, serde_json::to_vec(&serde_json::json!({
+        "name": "analytics-read", "expirationTime": expiry, "allowedCidrs": ["203.0.113.7/32"],
+        "scopes": [{ "scopeType": "universe-analytics", "targetParts": ["777"], "operations": ["universe.analytics:read"] }]
+    })).unwrap()).unwrap();
+    let output = run(
+        root.path(),
+        &[
+            "apikey",
+            "create",
+            "--request",
+            request.to_str().unwrap(),
+            "--secret-name",
+            "analytics-read",
+        ],
+    );
+    assert!(output.status.success());
+    assert_eq!(json(&output)["data"]["dryRun"], true);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn analytics_csv_export_is_offline_and_does_not_start_a_browser_by_default() {
+    let root = tempfile::tempdir().unwrap();
+    let output = run(
+        root.path(),
+        &[
+            "analytics",
+            "export",
+            "--url",
+            "https://create.roblox.com/dashboard/creations/experiences/77/analytics/retention?groupId=42",
+            "--chart",
+            "Day 1 retention",
+            "--output",
+            root.path().join("retention.csv").to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json(&output)["error"]["code"], "live_not_enabled");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn browser_page_loading_needs_separate_consent_before_any_credential_access() {
+    let root = tempfile::tempdir().unwrap();
+    let output = run(
+        root.path(),
+        &[
+            "analytics",
+            "export",
+            "--url",
+            "https://create.roblox.com/dashboard/creations/experiences/77/analytics/retention",
+            "--chart",
+            "Day 1 retention",
+            "--output",
+            root.path().join("out.csv").to_str().unwrap(),
+            "--live",
+        ],
+    );
+    assert_eq!(
+        json(&output)["error"]["code"],
+        "browser_navigation_not_allowed"
+    );
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn settings_group_switch_and_dashboard_links_have_explicit_targets() {
+    let root = tempfile::tempdir().unwrap();
+    let settings = run(
+        root.path(),
+        &[
+            "experiences",
+            "settings",
+            "--universe",
+            "77",
+            "--group",
+            "42",
+        ],
+    );
+    assert_eq!(json(&settings)["error"]["code"], "live_not_enabled");
+    let group = run(root.path(), &["experiences", "list", "--group", "42"]);
+    assert_eq!(json(&group)["error"]["code"], "live_not_enabled");
+    let links = run(
+        root.path(),
+        &["dashboard", "links", "--universe", "77", "--group", "42"],
+    );
+    assert!(links.status.success());
+    assert_eq!(
+        json(&links)["data"]["settingsUrl"],
+        "https://create.roblox.com/dashboard/creations/experiences/77/configure?groupId=42"
+    );
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn unsupported_writes_keys_and_cookie_arguments_do_not_echo_values() {
     let root = tempfile::tempdir().unwrap();
     for args in [
