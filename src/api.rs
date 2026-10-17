@@ -242,6 +242,22 @@ impl<T: Transport> Api<T> {
         Ok(serde_json::json!({ "keys": keys, "groupId": group, "hasMore": !cursor.is_empty() }))
     }
 
+    pub fn confirm_account<C: Clock>(
+        &mut self,
+        expected: u64,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<User, AppError> {
+        let user = self.whoami(guard)?;
+        if user.id != expected {
+            return Err(AppError::new(
+                "account_confirmation_mismatch",
+                "The manually authenticated browser is not the originally verified account.",
+                "Stop. No CSV action, owner fallback, or alternate-account retry is attempted.",
+            ));
+        }
+        Ok(user)
+    }
+
     pub fn whoami<C: Clock>(&mut self, guard: &mut TrafficGuard<C>) -> Result<User, AppError> {
         let user: User = self.read(
             Url::parse("https://users.roblox.com/v1/users/authenticated").unwrap(),
@@ -552,6 +568,23 @@ mod tests {
             api.transport.requests[0].as_str(),
             "https://users.roblox.com/v1/users/authenticated"
         );
+    }
+
+    #[test]
+    fn reauthenticated_browser_must_match_the_original_account() {
+        for id in [1, 99] {
+            let root = tempfile::tempdir().unwrap();
+            let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+            let mut api = api(vec![response(json!({ "id": id, "name": "synthetic" }))]);
+            match api.confirm_account(1, &mut guard) {
+                Ok(user) => assert_eq!(user.id, 1),
+                Err(error) => {
+                    assert_eq!(id, 99);
+                    assert_eq!(error.code, "account_confirmation_mismatch");
+                }
+            }
+            assert_eq!(api.transport.requests.len(), 1);
+        }
     }
 
     #[test]

@@ -11,9 +11,11 @@ not API-key/OAuth authentication. Using generated keys belongs in
 This is an unofficial, early local tool, not full Dashboard coverage.
 
 **Verification limit:** automated tests use fake accounts, mock HTTP/UI, fake
-clocks and loopback only. The Rust implementation, private-browser CSV flow and
-key issuance have **not been exercised against a real Roblox account**. UI and
-private API contracts can change. See [contract evidence](docs/contracts.md).
+clocks and loopback only. Separately authorized identity/group/experience reads
+succeeded against a real account. A bounded browser attempt reached a Roblox
+login route, not a confirmed 2FA/CAPTCHA challenge. CSV export and key issuance
+are not yet verified end to end. UI/private API contracts can change. See
+[contract evidence](docs/contracts.md).
 
 ## Build and discover commands offline
 
@@ -112,6 +114,40 @@ are never attached to or terminated. The adapter's real UI behavior is unverifie
 Geckodriver is a separate Mozilla tool under MPL-2.0; see its
 [source and license](https://github.com/mozilla/geckodriver).
 
+### Diagnose a stop, or explicitly log in manually
+
+Version 0.2.1 preserves conservative stops but reports safe, fixed categories in
+`error.details.browserAuth`: `signal`, `originCategory`, `routeCategory`, `phase`.
+Signals distinguish `login_route`, `challenge_route`, `unexpected_origin`,
+`challenge_frame`, `verification_dialog`. These are **observations/heuristics**,
+not proof that a CAPTCHA/2FA challenge was issued. No raw URL, query, DOM text,
+iframe address, password, code or cookie is included in these diagnostics.
+Unknown values become `unclassified`; a stop never retries automatically.
+
+If the regular Firefox account works but the new private browser is sent to
+login, explicitly add `--interactive-login` to the export command. This is a
+visible private Firefox, not a stealth setting or challenge bypass:
+
+1. Keep a working original Firefox session: it establishes the expected account.
+2. In the **new Firefox window only**, complete login and any verification
+   yourself. The CLI never fills credentials or solves challenges.
+3. If necessary, navigate manually in that same window to the exact analytics
+   URL printed in the terminal. Do not switch owner/experience.
+4. Type `continue` plus Enter in the terminal only when ready. Never type a
+   password/code in the terminal or agent chat. `cancel`/EOF/5 minutes ends the run.
+
+While waiting, no browser-control or authentication polling is performed. After
+confirmation, robcli checks the exact experience/tab/group, reads only the named
+session cookie from its **owned** private browser in memory, and verifies its
+account through the fixed whoami API. A different account/target stops before
+CSV. No second automatic navigation, reload or export click is added. The extra
+identity read counts within the unchanged five-attempt budget (a complete
+interactive export uses five reservations). User-driven login/navigation has
+normal browser traffic outside the direct API cap. Filters are those of the
+manually confirmed page and are not automatically extracted. The owned browser
+and its session are discarded at exit; existing Firefox is untouched. Real
+manual-login/CSV completion remains unverified until the user completes this flow.
+
 ## Review a key plan before issuing anything
 
 `rob apikey list [--group 42] --live` returns metadata only: ID, owner, name, enable
@@ -202,9 +238,13 @@ registry publication or release workflow has been selected; `publish = false`.
 cargo fmt --check
 cargo clippy --offline --locked --all-targets -- -D warnings
 cargo test --offline --locked
+node --test tests/browser-auth-script.mjs
 ```
 
-With cached dependencies these run offline. Windows is the verified build/test
+The Node command is development-only: it runs the actual embedded WebDriver
+script against synthetic DOM/location inputs, with no browser or network. It is
+not a runtime dependency. With cached dependencies these tests run offline.
+Windows is the verified build/test
 platform; macOS/Linux execution is unverified, and browser export rejects those
 platforms. Contract drift or unsupported UI should produce a stop, not a live
 selector/API probing loop. Record a sanitized fixture before changing adapters.

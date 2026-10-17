@@ -68,6 +68,12 @@ impl SessionCookie {
         self.0.as_str()
     }
 
+    /// Accept only the named cookie read from our owned, manually authenticated
+    /// private browser. No raw-cookie CLI/environment input is introduced.
+    pub fn from_owned_browser(value: String) -> Result<Self, AppError> {
+        Self::new(value)
+    }
+
     fn new(value: String) -> Result<Self, AppError> {
         let secret = Zeroizing::new(value);
         if secret.is_empty()

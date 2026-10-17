@@ -32,12 +32,20 @@ fn failure(command: &str, error: &AppError) -> Value {
 fn run(cli: Cli) -> Result<Value, AppError> {
     let command = cli.command.label();
     let export_options = if let Command::Analytics {
-        command: AnalyticsCommand::Export {
-            url, chart, output, ..
-        },
+        command:
+            AnalyticsCommand::Export {
+                url,
+                chart,
+                output,
+                interactive_login,
+                ..
+            },
     } = &cli.command
     {
-        Some(browser::ExportOptions::validate(url, chart, output)?)
+        Some(
+            browser::ExportOptions::validate(url, chart, output)?
+                .with_interactive_login(*interactive_login),
+        )
     } else {
         None
     };
@@ -98,7 +106,10 @@ fn run(cli: Cli) -> Result<Value, AppError> {
                     "csrfReplay": "one token-validation replay only with explicit --allow-csrf-handshake; never 2FA/challenge bypass",
                     "browserExport": { "requires": ["--live", "--allow-browser-page-load"], "driver": "Mozilla geckodriver / private Firefox / Windows Job Object",
                         "limits": "one analytics page load, one menu click, one CSV click, no reload or re-click",
-                        "normalBrowserRequestsAreOutsideDirectApiCap": true } },
+                        "normalBrowserRequestsAreOutsideDirectApiCap": true,
+                        "interactiveLogin": { "flag": "--interactive-login", "timeoutSeconds": 300,
+                            "humanAuthenticationOnly": true, "sameAccountReverified": true, "exactTargetRechecked": true,
+                            "credentialsSaved": false, "existingFirefoxAttached": false } } },
                 "scope": "Explicit personal/group selection. Key issuance uses session authentication and local secret files, never API-key authentication."
             }),
         ));
@@ -174,6 +185,7 @@ fn run(cli: Cli) -> Result<Value, AppError> {
             &options,
             &cookie,
             browser_driver.as_ref().unwrap(),
+            user_id,
             &mut guard,
         )?;
         return Ok(success(

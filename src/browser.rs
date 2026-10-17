@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -18,6 +18,7 @@ pub(crate) struct ExportOptions {
     pub url: Url,
     pub chart: String,
     output: PathBuf,
+    interactive_login: bool,
 }
 
 fn browser_error(code: &'static str, message: &'static str) -> AppError {
@@ -86,7 +87,13 @@ impl ExportOptions {
             url,
             chart: chart.to_owned(),
             output: output.to_path_buf(),
+            interactive_login: false,
         })
+    }
+
+    pub fn with_interactive_login(mut self, enabled: bool) -> Self {
+        self.interactive_login = enabled;
+        self
     }
 }
 
@@ -118,6 +125,31 @@ trait ChartUi {
     fn collect_csv(&mut self) -> Result<Vec<u8>, AppError>;
 }
 
+fn auth_stop(value: &Value, phase: &str) -> AppError {
+    // Page/driver values are untrusted. Project fixed categories only: never
+    // return the raw URL, query, DOM text, cookie, iframe source, or driver body.
+    let project = |field: &str, allowed: &[&str]| {
+        let value = value[field].as_str().unwrap_or("unclassified");
+        if allowed.contains(&value) {
+            value.to_owned()
+        } else {
+            "unclassified".to_owned()
+        }
+    };
+    let mut error = browser_error(
+        "browser_auth_required",
+        "The browser stopped on an authentication or navigation signal. This does not by itself prove a 2FA or CAPTCHA challenge.",
+    );
+    error.details = Some(json!({ "browserAuth": {
+        "signal": project("signal", &["login_route", "challenge_route", "unexpected_origin", "challenge_frame", "verification_dialog"]),
+        "originCategory": project("originCategory", &["creator_dashboard", "roblox_web", "roblox_auth", "other"]),
+        "routeCategory": project("routeCategory", &["login", "challenge", "experience_analytics", "dashboard_other", "landing", "other"]),
+        "phase": if ["target-probe", "probe", "menu", "menu-probe", "download"].contains(&phase) { phase } else { "unclassified" },
+        "classificationOnly": true, "automaticRetry": false
+    } }));
+    error
+}
+
 fn report(
     ui: &mut impl ChartUi,
     phase: &str,
@@ -145,9 +177,12 @@ fn report(
                 ));
             }
             Some("auth_required") => {
+                return Err(auth_stop(&value, phase));
+            }
+            Some("wrong_target") => {
                 return Err(browser_error(
-                    "browser_auth_required",
-                    "The browser requires login or an additional challenge.",
+                    "browser_target_mismatch",
+                    "The browser is not on the explicitly selected experience, analytics tab and group. No chart was read or clicked.",
                 ));
             }
             _ => {
@@ -242,6 +277,7 @@ pub(crate) fn export<C: Clock>(
     options: &ExportOptions,
     cookie: &SessionCookie,
     driver_path: &Path,
+    expected_user: u64,
     guard: &mut TrafficGuard<C>,
 ) -> Result<Value, AppError> {
     let mut target = CsvTarget::reserve(&options.output)?;
@@ -251,12 +287,20 @@ pub(crate) fn export<C: Clock>(
             "Cannot create an owned temporary download directory.",
         )
     })?;
-    let mut ui = LocalDriver::launch(driver_path, downloads.path())?;
+    let mut ui = LocalDriver::launch(driver_path, downloads.path(), options)?;
     guard.reserve()?;
     ui.navigate("https://www.roblox.com/robots.txt")?;
     ui.call(Method::POST, "cookie", Some(json!({ "cookie": { "name": ".ROBLOSECURITY", "value": cookie.browser_value(), "domain": ".roblox.com", "path": "/", "secure": true, "httpOnly": true, "sameSite": "Lax" } })))?;
     guard.reserve()?;
     ui.navigate(options.url.as_str())?;
+    if options.interactive_login {
+        manual_login_gate(options, expected_user)?;
+        report(&mut ui, "target-probe", &options.chart, 0)?;
+        let browser_cookie = ui.owned_session_cookie()?;
+        let mut api =
+            crate::api::Api::new(crate::transport::HttpsTransport::new()?, browser_cookie);
+        api.confirm_account(expected_user, guard)?;
+    }
     let bytes = export_chart(&mut ui, &options.chart, guard)?;
     target
         .file
@@ -272,9 +316,36 @@ pub(crate) fn export<C: Clock>(
     target.complete = true;
     Ok(
         json!({ "chart": options.chart, "sourceUrl": options.url.as_str(), "output": options.output.to_string_lossy(), "bytes": bytes.len(),
-        "filters": "Fresh Dashboard page defaults; old browser local-storage filters are not copied.",
+        "interactiveLogin": options.interactive_login, "accountReverified": options.interactive_login,
+        "filters": if options.interactive_login { "Filters of the manually confirmed page; not extracted automatically." } else { "Fresh Dashboard page defaults; old browser local-storage filters are not copied." },
         "browserTraffic": "One analytics page load and one export click; normal page assets/XHR are not covered by the direct-API request cap." }),
     )
+}
+
+fn manual_login_gate(options: &ExportOptions, expected_user: u64) -> Result<(), AppError> {
+    writeln!(std::io::stderr(), "ROB_MANUAL_LOGIN: A new private Firefox is open. Log in as Roblox user {expected_user} in that browser only. Never type a password or verification code here.\nOpen this exact target in the SAME window after login if necessary:\n{}\nThen type continue and Enter here, or cancel. Limit: 5 minutes. No browser control or authentication polling occurs while waiting.", options.url.as_str())
+        .map_err(|_| browser_error("manual_login_unavailable", "Cannot display the manual-login instructions."))?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut input = zeroize::Zeroizing::new(String::new());
+        let accepted = std::io::stdin()
+            .lock()
+            .take(64)
+            .read_line(&mut input)
+            .is_ok_and(|count| count > 0 && input.trim() == "continue");
+        let _ = sender.send(accepted);
+    });
+    match receiver.recv_timeout(Duration::from_secs(300)) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(browser_error(
+            "manual_login_cancelled",
+            "Manual login was cancelled or its input was closed. The owned browser will close.",
+        )),
+        Err(_) => Err(browser_error(
+            "manual_login_timeout",
+            "Manual login confirmation did not arrive within 5 minutes. The owned browser will close.",
+        )),
+    }
 }
 
 struct LocalDriver {
@@ -283,10 +354,11 @@ struct LocalDriver {
     base: String,
     session: String,
     downloads: PathBuf,
+    expected_url: String,
 }
 
 impl LocalDriver {
-    fn launch(binary: &Path, downloads: &Path) -> Result<Self, AppError> {
+    fn launch(binary: &Path, downloads: &Path, options: &ExportOptions) -> Result<Self, AppError> {
         let port = {
             let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| {
                 browser_error(
@@ -346,7 +418,7 @@ impl LocalDriver {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        let capabilities = private_capabilities(downloads);
+        let capabilities = private_capabilities(downloads, options.interactive_login);
         let response = client
             .post(format!("{base}/session"))
             .json(&capabilities)
@@ -391,6 +463,7 @@ impl LocalDriver {
             base,
             session,
             downloads: downloads.to_path_buf(),
+            expected_url: options.url.to_string(),
         };
         driver.call(
             Method::POST,
@@ -440,13 +513,26 @@ impl LocalDriver {
                 "The private browser refused the action. Raw driver messages are not printed.",
             ));
         }
-        let value: Value = response.json().map_err(|_| {
+        let mut value: Value = response.json().map_err(|_| {
             browser_error(
                 "browser_control_failed",
                 "The private browser returned an invalid response.",
             )
         })?;
-        Ok(value["value"].clone())
+        Ok(value["value"].take())
+    }
+
+    fn owned_session_cookie(&mut self) -> Result<SessionCookie, AppError> {
+        let mut cookie = self.call(Method::GET, "cookie/.ROBLOSECURITY", None)?;
+        if cookie["name"] == ".ROBLOSECURITY"
+            && let Value::String(value) = cookie["value"].take()
+        {
+            return SessionCookie::from_owned_browser(value);
+        }
+        Err(browser_error(
+            "manual_login_session_missing",
+            "The owned browser did not have the expected session cookie after manual confirmation.",
+        ))
     }
 
     fn navigate(&mut self, url: &str) -> Result<(), AppError> {
@@ -455,9 +541,9 @@ impl LocalDriver {
     }
 }
 
-fn private_capabilities(downloads: &Path) -> Value {
+fn private_capabilities(downloads: &Path, interactive: bool) -> Value {
     json!({ "capabilities": { "alwaysMatch": { "browserName": "firefox", "moz:firefoxOptions": {
-        "args": ["--headless", "--private-window"], "prefs": {
+        "args": if interactive { vec!["--private-window"] } else { vec!["--headless", "--private-window"] }, "prefs": {
             "browser.privatebrowsing.autostart": true, "browser.sessionstore.resume_from_crash": false,
             "browser.sessionstore.max_tabs_undo": 0, "browser.sessionstore.max_windows_undo": 0,
             "browser.download.folderList": 2, "browser.download.dir": downloads.to_string_lossy(),
@@ -475,7 +561,7 @@ impl ChartUi for LocalDriver {
         self.call(
             Method::POST,
             "execute/sync",
-            Some(json!({ "script": CHART_SCRIPT, "args": [chart, phase] })),
+            Some(json!({ "script": CHART_SCRIPT, "args": [chart, phase, self.expected_url] })),
         )
     }
 
@@ -707,11 +793,25 @@ mod winjob {
 // This uses the visible menu reported by the user's screenshot, not an invented
 // analytics-query payload. Missing/ambiguous UI is a stop, not a selector sweep.
 const CHART_SCRIPT: &str = r#"
-const [chart, phase] = arguments;
+const [chart, phase, expected] = arguments;
 const norm = s => (s || '').replace(/\s+/g, ' ').trim();
 const visible = e => !!e && e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0 && getComputedStyle(e).visibility !== 'hidden';
-if (location.origin !== 'https://create.roblox.com' || /login|captcha|challenge/i.test(location.pathname)) return {state:'auth_required'};
-if ([...document.querySelectorAll('iframe')].some(e => visible(e) && /captcha|challenge|arkoselabs/i.test(e.src || '')) || [...document.querySelectorAll('[role="dialog"]')].some(e => visible(e) && /two.step|captcha|security verification|verification required|認証/i.test(e.textContent || ''))) return {state:'auth_required'};
+const originCategory = location.origin === 'https://create.roblox.com' ? 'creator_dashboard' : location.origin === 'https://www.roblox.com' ? 'roblox_web' : location.origin === 'https://auth.roblox.com' ? 'roblox_auth' : 'other';
+const routeCategory = /login/i.test(location.pathname) ? 'login' : /captcha|challenge/i.test(location.pathname) ? 'challenge' : /^\/dashboard\/creations\/experiences\/[1-9][0-9]*\/analytics\//.test(location.pathname) ? 'experience_analytics' : location.pathname.startsWith('/dashboard') ? 'dashboard_other' : location.pathname === '/' ? 'landing' : 'other';
+const authSignal = signal => ({state:'auth_required', signal, originCategory, routeCategory});
+// Preserve the conservative stop conditions; classify them rather than silently
+// weakening a refusal or claiming that a signal proves a security challenge.
+if (originCategory !== 'creator_dashboard') return authSignal(routeCategory === 'login' && ['roblox_web','roblox_auth'].includes(originCategory) ? 'login_route' : routeCategory === 'challenge' && ['roblox_web','roblox_auth'].includes(originCategory) ? 'challenge_route' : 'unexpected_origin');
+if (routeCategory === 'login') return authSignal('login_route');
+if (routeCategory === 'challenge') return authSignal('challenge_route');
+if ([...document.querySelectorAll('iframe')].some(e => visible(e) && /captcha|challenge|arkoselabs/i.test(e.src || ''))) return authSignal('challenge_frame');
+if ([...document.querySelectorAll('[role="dialog"]')].some(e => visible(e) && /two.step|captcha|security verification|verification required|認証/i.test(e.textContent || ''))) return authSignal('verification_dialog');
+if (expected) {
+  const target = new URL(expected);
+  const groups = new URLSearchParams(location.search).getAll('groupId');
+  if (location.pathname !== target.pathname || groups.length > 1 || (groups[0] || null) !== target.searchParams.get('groupId')) return {state:'wrong_target'};
+}
+if (phase === 'target-probe') return {state:'ready'};
 if (phase === 'menu-probe' || phase === 'download') {
   const matches = [...document.querySelectorAll('[role="menuitem"],li,button,a')].filter(e => visible(e) && ['Download CSV','CSVをダウンロード'].includes(norm(e.textContent)));
   const items = matches.filter(e => !matches.some(other => other !== e && e.contains(other)));
@@ -768,6 +868,81 @@ mod tests {
             "analytics_no_data"
         );
         assert_eq!(ui.calls, vec!["probe"]);
+    }
+
+    struct AuthSignal {
+        value: Value,
+        calls: Vec<String>,
+    }
+    impl ChartUi for AuthSignal {
+        fn execute(&mut self, phase: &str, _: &str) -> Result<Value, AppError> {
+            self.calls.push(phase.to_owned());
+            Ok(self.value.clone())
+        }
+        fn collect_csv(&mut self) -> Result<Vec<u8>, AppError> {
+            panic!("an authentication signal must not download")
+        }
+    }
+
+    #[test]
+    fn authentication_stop_reports_only_allowlisted_diagnostics_and_does_not_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut ui = AuthSignal {
+            value: json!({ "state": "auth_required", "signal": "login_route",
+                "originCategory": "roblox_web", "routeCategory": "login",
+                "url": "https://example.com/?token=synthetic-private-value", "cookie": "synthetic-private-value" }),
+            calls: Vec::new(),
+        };
+        let error = export_chart(&mut ui, "Day 1 retention", &mut guard).unwrap_err();
+        assert_eq!(error.code, "browser_auth_required");
+        let serialized = serde_json::to_value(&error).unwrap();
+        assert_eq!(
+            serialized["details"]["browserAuth"]["signal"],
+            "login_route"
+        );
+        assert_eq!(
+            serialized["details"]["browserAuth"]["originCategory"],
+            "roblox_web"
+        );
+        assert_eq!(
+            serialized["details"]["browserAuth"]["routeCategory"],
+            "login"
+        );
+        assert!(!serialized.to_string().contains("synthetic-private-value"));
+        assert_eq!(ui.calls, ["probe"]);
+    }
+
+    #[test]
+    fn unrecognized_authentication_diagnostics_are_not_echoed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut ui = AuthSignal {
+            value: json!({ "state": "auth_required", "signal": "private-synthetic-value",
+                "originCategory": "private-synthetic-value", "routeCategory": "private-synthetic-value" }),
+            calls: Vec::new(),
+        };
+        let error = export_chart(&mut ui, "Day 1 retention", &mut guard).unwrap_err();
+        let serialized = serde_json::to_value(&error).unwrap();
+        let details = &serialized["details"]["browserAuth"];
+        assert_eq!(details["signal"], "unclassified");
+        assert_eq!(details["originCategory"], "unclassified");
+        assert_eq!(details["routeCategory"], "unclassified");
+        assert_eq!(details["classificationOnly"], true);
+        assert_eq!(details["automaticRetry"], false);
+        assert!(!serialized.to_string().contains("private-synthetic-value"));
+        assert_eq!(ui.calls, ["probe"]);
+    }
+
+    #[test]
+    fn interactive_browser_is_visible_private_and_never_uses_an_existing_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let caps = private_capabilities(root.path(), true);
+        let options = &caps["capabilities"]["alwaysMatch"]["moz:firefoxOptions"];
+        assert_eq!(options["args"], json!(["--private-window"]));
+        assert_eq!(options["prefs"]["browser.privatebrowsing.autostart"], true);
+        assert!(options.get("profile").is_none());
+        assert!(!options.to_string().contains("--profile"));
     }
 
     struct Scripted {
@@ -860,7 +1035,7 @@ mod tests {
                     .is_err()
             );
         }
-        let caps = private_capabilities(root.path());
+        let caps = private_capabilities(root.path(), false);
         let options = &caps["capabilities"]["alwaysMatch"]["moz:firefoxOptions"];
         assert_eq!(options["prefs"]["browser.privatebrowsing.autostart"], true);
         assert!(options.get("profile").is_none());

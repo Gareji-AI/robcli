@@ -107,6 +107,9 @@ pub(crate) enum AnalyticsCommand {
         /// Consent to normal browser page assets/XHR, outside the direct-API HTTP cap.
         #[arg(long)]
         allow_browser_page_load: bool,
+        /// Open a visible private Firefox for one manual login/confirmation (5-minute limit).
+        #[arg(long)]
+        interactive_login: bool,
     },
 }
 

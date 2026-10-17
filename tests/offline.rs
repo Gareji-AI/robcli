@@ -147,6 +147,27 @@ fn browser_page_loading_needs_separate_consent_before_any_credential_access() {
 }
 
 #[test]
+fn interactive_login_still_requires_live_before_reading_credentials_or_opening_firefox() {
+    let root = tempfile::tempdir().unwrap();
+    let output = run(
+        root.path(),
+        &[
+            "analytics",
+            "export",
+            "--url",
+            "https://create.roblox.com/dashboard/creations/experiences/77/analytics/retention",
+            "--chart",
+            "Day 1 retention",
+            "--output",
+            root.path().join("out.csv").to_str().unwrap(),
+            "--interactive-login",
+        ],
+    );
+    assert_eq!(json(&output)["error"]["code"], "live_not_enabled");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn settings_group_switch_and_dashboard_links_have_explicit_targets() {
     let root = tempfile::tempdir().unwrap();
     let settings = run(

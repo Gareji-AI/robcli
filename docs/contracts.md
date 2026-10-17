@@ -2,8 +2,11 @@
 
 Implementation evidence, not a guarantee of live compatibility. Checked
 2026-10-17 JST using public documentation/source and a user-supplied screenshot.
-No real-account reads, key issuance, browser navigation or CSV export were run
-while implementing version 0.2. Automated tests use synthetic fixtures.
+The initial 0.2 implementation was tested only with synthetic fixtures. Subsequent
+separately authorized identity/group/experience reads succeeded. A single bounded
+0.2.1 diagnostic export identified a Roblox-web `login_route` during `probe`;
+no export click/file or key issuance occurred. This does not prove a 2FA/CAPTCHA
+challenge. Automated regression tests remain offline.
 
 ## Published API reads
 
@@ -39,8 +42,10 @@ successful export or a verified DOM selector**. Private titles/IDs and the
 screenshot itself are not copied into this repository.
 
 The browser adapter uses an exact chart title, unique menu, enabled Download CSV
-and one bounded download. Missing/ambiguous selectors fail closed. The UI adapter
-and Firefox private-mode attestation remain unverified against a real browser.
+and one bounded download. Missing/ambiguous selectors fail closed. The UI selectors
+and completed CSV export remain unverified. Private-mode attestation, cookie
+injection and bounded navigation reached the login-route diagnostic in a real
+owned browser; this is not successful Dashboard login.
 Fresh-page filter defaults are intentionally disclosed; no claim of exporting
 the date range or filter state of an existing user's tab.
 
@@ -83,10 +88,32 @@ failures have no automatic retry.
 Mozilla [geckodriver releases](https://github.com/mozilla/geckodriver/releases)
 and [Firefox capability documentation](https://firefox-source-docs.mozilla.org/testing/geckodriver/Capabilities.html)
 describe the separate WebDriver tool and preference setup. The local 0.37.1 win64
-ZIP was checked against its official GitHub asset SHA-256; only `--version` and
-`--help` were executed. No driver service or Firefox session was started.
+ZIP was checked against its official GitHub asset SHA-256. Initial installation
+ran version/help only; subsequent authorized CSV attempts started new owned
+private sessions and ended them on the authentication/navigation stop.
 
 Firefox's own page requests are outside the direct-client five-request quota.
 The adapter requires separate browser-page consent and limits navigations/clicks;
 it does not claim a five-HTTP-request limit for a modern web page. Only a newly
 owned private process tree is controlled, with no real-profile cloning/attachment.
+
+## Safe diagnostics and human authentication
+
+The old adapter collapsed navigation refusal, login routing, challenge-like
+iframes and verification-like dialogs into one error. Version 0.2.1 retains the
+stop conditions but positively projects fixed signal/origin/route/phase enums.
+Real observation is a Roblox-web login route, not evidence identifying the
+reason for that redirect (missing browser state, policy, or something else).
+Synthetic tests exercise the exact production script, including no raw URL/DOM
+echo and rejection of another universe/group after human login.
+
+`--interactive-login` is an explicit, bounded human-authentication mode. The
+private browser is visible; the user authenticates on Roblox itself and confirms
+in stdin within five minutes. There is no WebDriver polling while the user types,
+credential autofill, challenge solution, stealth flag or browser-profile copy.
+Then the exact target is rechecked and the owned browser's named cookie is used
+only in memory to reverify the same account against the published whoami route.
+Additional identity verification counts within the same hard request budget.
+Different accounts/targets stop before CSV. Browser-managed user login traffic
+is not represented as five total HTTP requests. Complete manual authentication
+and CSV download have not yet been confirmed end to end.
