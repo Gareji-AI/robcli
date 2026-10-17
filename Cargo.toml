@@ -3,8 +3,26 @@ name = "robcli"
 version = "0.6.0"
 edition = "2024"
 rust-version = "1.99"
-publish = false
+publish = ["crates-io"]
 description = "Roblox Dashboard and public games, profiles, communities and catalogs with bounded reads"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/eiei114/robcli"
+readme = "readme.md"
+authors = ["eiei114"]
+keywords = ["roblox", "cli", "dashboard", "creator-store", "agents"]
+categories = ["command-line-utilities", "development-tools"]
+# Publish reviewed source/docs only, never local traffic state, credentials or captures.
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "readme.md",
+    "license-mit",
+    "license-apache",
+    "changelog.md",
+    "src/**",
+    "tests/**",
+    "docs/**",
+]
 
 [[bin]]
 name = "rob"

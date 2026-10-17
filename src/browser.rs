@@ -2,7 +2,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+#[cfg(windows)]
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use reqwest::{Method, Url};
