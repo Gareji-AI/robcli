@@ -1,6 +1,6 @@
 # robcli
 
-**Roblox Dashboard, Creator Store and avatar Marketplace from the terminal.** Project: `robcli`. Executable:
+**Roblox Dashboard, public charts/games, Creator Store and avatar Marketplace from the terminal.** Project: `robcli`. Executable:
 `rob`, following [gogcli / gog](https://github.com/openclaw/gogcli)'s naming and
 resource-oriented command style. Implemented in Rust; no Node.js runtime required.
 
@@ -18,6 +18,11 @@ Search results include typed IDs, Robux prices, catalog/preview-page links and
 `HumanoidDescription` appearance hints. These are **metadata, not an actual
 try-on, purchase, ownership grant or account-avatar change**.
 
+Version 0.5 adds anonymous game charts, Music Top 100, experience snapshots
+(players/visits/favorites/votes), published Top Songs, passes and developer
+products. Public reads are separate from the authenticated `experiences list`
+and settings commands. No purchase or private creator-configuration/sales read.
+
 **Verification limit:** automated tests use fake accounts, mock HTTP/UI, fake
 clocks and loopback only. Separately authorized identity/group/experience reads
 succeeded against a real account. Anonymous avatar Jacket search returned 10
@@ -34,6 +39,68 @@ The latest user-confirmed **Dashboard CSV** run stopped at WebDriver named-cooki
 reverification. Why that cookie is not visible to the controlled document is
 unresolved. This is not a confirmed CAPTCHA/2FA block or a working CSV export.
 No additional live retry is approved by that result.
+
+## Browse charts and inspect an experience without signing in
+
+```sh
+# Alternatives, not a batch/crawler. Default chart: Top Playing Now.
+rob charts games --limit 10 --live
+rob charts games --country JP --device computer --live
+rob charts sorts --live
+rob charts music --limit 10 --live
+```
+
+Game charts retain Roblox's order, Universe and root Place IDs, player counts,
+up/down votes and a calculated `likePercent` when those values are present.
+Device/country affect the result. `--sort` accepts a returned sort ID; the default
+is `top-playing-now`. These are snapshots, not polling or a certified global rank.
+The chart API controls its page size: `--limit` caps local output (1–30), with
+`returnedByApi`, `truncatedLocally` and `omittedFromPage`. No fabricated next token
+or hidden page crawl. Sort-ID output is also capped at 30.
+
+Music uses **Roblox Music Top 100**, not Creator Store `Trending` audio searches.
+Cards expose title, artist, album, duration, asset ID and Store link, with explicit
+page tokens and no playback, media download or usage-permission grant.
+
+```sh
+# 77/88 are fictional. Replace with the correctly typed ID from a chart result.
+rob games get --universe 77 --live
+rob games get --place 88 --live
+rob games music --universe 77 --limit 10 --live
+rob games passes --universe 77 --limit 10 --live
+rob games products --universe 77 --limit 10 --live
+```
+
+`places` is an alias of `games`. Choose exactly one `--universe` or `--place`.
+A Place ID is resolved to its Universe with **one extra public GET**; the IDs
+are never silently interchanged. `games get` uses two reads (details + votes),
+or three with Place resolution. `playing` is an **experience/Universe snapshot**,
+not one subplace/server. The like percentage is `100 * up / (up + down)`; zero
+or missing votes yield null, not a fabricated 0%.
+
+`games music` reads the public **Top Songs** section: supported licensed/ISRC
+tracks ranked by playtime over the last 7 days. It does **not** enumerate all BGM,
+inspect game source, identify a track currently playing in a server, or establish
+music rights. Empty results do not mean the experience contains no music.
+
+Passes/products are one public page, with explicit `--page-token` continuation.
+For developer products, output `productId` is the current primary `ProductId`,
+not the retired internal `DeveloperProductId`/`TargetId`. For passes, `passId`
+is the pass ID, not its separate commerce product ID. Prices are anonymous Robux
+snapshots; absent prices stay null, not free. No account ownership, regional or
+personalized checkout quote, private sales/revenue, purchase or creator write.
+
+All commands above reject `--profile`, never resolve Firefox and attach no
+Cookie/Authorization/API-key/CSRF headers. Each shares the existing live lock,
+five-attempt/run and rolling-minute budget, two-second spacing and no-retry rule.
+No command automatically fetches music, passes and products for every chart row.
+
+Five bounded anonymous API captures succeeded: chart (97 returned, 10 projected),
+Music Top 100 (10), experience songs (4), products (10) and passes (2). The five
+saved public responses were replayed **offline** through the final projections;
+no further live calls followed. Sort listing, individual details/votes and Place
+resolution are specification/mock-tested, not live-tested in this increment.
+See [public endpoint evidence and limitations](docs/public-discovery.md).
 
 ## Search avatar clothes and get the right kind of ID
 

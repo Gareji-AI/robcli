@@ -5,10 +5,10 @@ use std::path::PathBuf;
 #[command(
     name = "rob",
     version,
-    about = "Roblox Creator Dashboard, Creator Store and avatar catalog CLI"
+    about = "Roblox Dashboard, public charts, games, Creator Store and avatar catalog CLI"
 )]
 #[command(
-    after_help = "Offline by default. --live permits one explicitly approved bounded operation.\nCreator Store and avatar catalog discovery are anonymous and never read Firefox credentials. Dashboard operations use the selected Firefox session.\nAvatar commands do not purchase, apply or save avatar appearance. API-key/OAuth authentication and cookie export are not supported. Key creation is plan-only unless --apply and account confirmation are supplied."
+    after_help = "Offline by default. --live permits one explicitly approved bounded operation.\nCharts, public games, Creator Store and avatar catalog reads are anonymous and never read Firefox credentials. Dashboard operations use the selected Firefox session.\nPublic discovery performs no purchase, media download or creator configuration change. Avatar commands do not apply or save appearance. API-key/OAuth authentication and cookie export are not supported. Key creation is plan-only unless --apply and account confirmation are supplied."
 )]
 pub(crate) struct Cli {
     /// Explicitly allow one bounded live probe. Never use in a test loop.
@@ -29,6 +29,17 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Public game charts and Music Top 100; anonymous one-page reads.
+    Charts {
+        #[command(subcommand)]
+        command: ChartCommand,
+    },
+    /// Public experience snapshots, Top Songs, passes and developer products.
+    #[command(visible_alias = "places")]
+    Games {
+        #[command(subcommand)]
+        command: GameCommand,
+    },
     /// Discover avatar clothing/accessories/bundles; never change the account avatar.
     #[command(visible_alias = "catalog")]
     Avatar {
@@ -81,6 +92,27 @@ pub(crate) enum Command {
 impl Command {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Charts {
+                command: ChartCommand::Sorts(_),
+            } => "charts sorts",
+            Self::Charts {
+                command: ChartCommand::Games { .. },
+            } => "charts games",
+            Self::Charts {
+                command: ChartCommand::Music(_),
+            } => "charts music",
+            Self::Games {
+                command: GameCommand::Get(_),
+            } => "games get",
+            Self::Games {
+                command: GameCommand::Music { .. },
+            } => "games music",
+            Self::Games {
+                command: GameCommand::Passes { .. },
+            } => "games passes",
+            Self::Games {
+                command: GameCommand::Products { .. },
+            } => "games products",
             Self::Avatar {
                 command: AvatarCommand::Search(_),
             } => "avatar search",
@@ -116,6 +148,51 @@ impl Command {
             Self::Schema => "schema",
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ChartCommand {
+    /// List the public chart sort IDs, not all games in every sort.
+    Sorts(crate::discovery::Chart),
+    /// One chart page; default Top Playing Now. No per-game detail enrichment.
+    Games {
+        #[command(flatten)]
+        query: crate::discovery::Chart,
+        #[arg(long, default_value = "top-playing-now")]
+        sort: String,
+        /// Local output cap; the public endpoint controls its own page size.
+        #[arg(long, default_value="10", value_parser=clap::value_parser!(u32).range(1..=30))]
+        limit: u32,
+    },
+    /// Official Music Top 100, not Creator Store trending search or all sound effects.
+    Music(crate::discovery::Page),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum GameCommand {
+    /// Public Universe snapshot and votes (2 reads; Place resolution adds 1).
+    Get(crate::discovery::Target),
+    /// Reported Top Songs over 7 days, not a complete BGM scan or live playback.
+    Music {
+        #[command(flatten)]
+        target: crate::discovery::Target,
+        #[arg(long, default_value="10", value_parser=clap::value_parser!(u32).range(1..=30))]
+        limit: u32,
+    },
+    /// One public pass page; no purchase, ownership claim or creator configuration.
+    Passes {
+        #[command(flatten)]
+        target: crate::discovery::Target,
+        #[command(flatten)]
+        page: crate::discovery::Page,
+    },
+    /// One public developer-product page, not private sales/revenue data.
+    Products {
+        #[command(flatten)]
+        target: crate::discovery::Target,
+        #[command(flatten)]
+        page: crate::discovery::Page,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -68,6 +68,127 @@ fn group_listing_is_available_but_offline_without_explicit_permission() {
 }
 
 #[test]
+fn public_discovery_commands_aliases_and_schema_work_offline_without_firefox() {
+    let root = tempfile::tempdir().unwrap();
+    for args in [
+        &["charts", "sorts"][..],
+        &["charts", "games"],
+        &["charts", "music"],
+        &["games", "get", "--universe", "77"],
+        &["places", "get", "--place", "88"],
+        &["games", "music", "--universe", "77"],
+        &["games", "passes", "--universe", "77"],
+        &["games", "products", "--place", "88"],
+    ] {
+        let out = run(root.path(), args);
+        assert_eq!(
+            json(&out)["error"]["code"],
+            "live_not_enabled",
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    let schema = json(&run(root.path(), &["schema"]));
+    assert_eq!(
+        schema["data"]["publicDiscovery"]["placeAndUniverseIdsAreDistinct"],
+        true
+    );
+    assert_eq!(schema["data"]["publicDiscovery"]["salesRevenue"], false);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn discovery_bad_input_and_profile_are_rejected_before_live_state_or_credentials() {
+    let root = tempfile::tempdir().unwrap();
+    for (args, code) in [
+        (
+            &["charts", "games", "--profile", "fake", "--live"][..],
+            "discovery_anonymous_only",
+        ),
+        (
+            &["charts", "games", "--sort", "bad/route", "--live"],
+            "discovery_query_invalid",
+        ),
+        (
+            &["charts", "sorts", "--country", "bad", "--live"],
+            "discovery_query_invalid",
+        ),
+        (
+            &[
+                "games",
+                "get",
+                "--universe",
+                "77",
+                "--place",
+                "88",
+                "--live",
+            ],
+            "invalid_arguments",
+        ),
+        (
+            &["games", "music", "--place", "0", "--live"],
+            "invalid_arguments",
+        ),
+        (
+            &[
+                "games",
+                "passes",
+                "--universe",
+                "77",
+                "--limit",
+                "31",
+                "--live",
+            ],
+            "invalid_arguments",
+        ),
+    ] {
+        let out = run(root.path(), args);
+        assert_eq!(json(&out)["error"]["code"], code, "{args:?}");
+    }
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn all_discovery_reads_obey_shared_budget_without_browser_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state_root(root.path());
+    std::fs::create_dir_all(&state).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    std::fs::write(
+        state.join("traffic.json"),
+        serde_json::to_vec(&serde_json::json!({"version":1,"starts":[now,now,now,now,now]}))
+            .unwrap(),
+    )
+    .unwrap();
+    for args in [
+        &["charts", "games", "--live"][..],
+        &["charts", "music", "--live"],
+        &["games", "get", "--place", "88", "--live"],
+        &["games", "music", "--universe", "77", "--live"],
+        &["games", "passes", "--universe", "77", "--live"],
+        &["games", "products", "--universe", "77", "--live"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_rob"))
+            .args(args)
+            .env_remove("APPDATA")
+            .env("LOCALAPPDATA", root.path())
+            .env("HOME", root.path())
+            .env("XDG_STATE_HOME", root.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            json(&out)["error"]["code"],
+            "traffic_budget_exhausted",
+            "{args:?}"
+        );
+        assert!(!state.join("live.lock").exists());
+    }
+}
+
+#[test]
 fn creator_store_search_is_offline_by_default_and_marketplace_alias_is_discoverable() {
     let root = tempfile::tempdir().unwrap();
     let output = run(

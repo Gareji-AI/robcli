@@ -151,6 +151,57 @@ impl Request {
         })
     }
 
+    /// Anonymous discovery only. No creator-management, purchase or asset routes.
+    pub fn discovery(url: Url) -> Result<Self, AppError> {
+        Self::validate(&url)?;
+        let numeric = |prefix: &str, suffix: &str| {
+            url.path()
+                .strip_prefix(prefix)
+                .and_then(|s| s.strip_suffix(suffix))
+                .and_then(|s| s.parse::<u64>().ok())
+                .is_some_and(|id| id > 0 && id <= i64::MAX as u64)
+        };
+        let keys: &[&str] = match (url.host_str(), url.path()) {
+            (Some("games.roblox.com"), "/v1/games" | "/v1/games/votes") => &["universeIds"],
+            (Some("apis.roblox.com"), "/explore-api/v1/get-sorts") => {
+                &["sessionId", "device", "country", "sortsPageToken"]
+            }
+            (Some("apis.roblox.com"), "/explore-api/v1/get-sort-content") => {
+                &["sessionId", "device", "country", "sortId", "pageToken"]
+            }
+            (Some("apis.roblox.com"), "/music-discovery/v1/top-songs") => &["limit", "pageToken"],
+            (Some("apis.roblox.com"), "/music-discovery/v1/experience-songs") => {
+                &["universeId", "limit"]
+            }
+            (Some("apis.roblox.com"), _) if numeric("/universes/v1/places/", "/universe") => &[],
+            (Some("apis.roblox.com"), _)
+                if numeric("/game-passes/v1/universes/", "/game-passes") =>
+            {
+                &["passView", "pageSize", "pageToken"]
+            }
+            (Some("apis.roblox.com"), _)
+                if numeric("/developer-products/v2/universes/", "/developerproducts") =>
+            {
+                &["limit", "cursor"]
+            }
+            _ => return Err(blocked()),
+        };
+        if (keys.is_empty() && url.query().is_some())
+            || url
+                .query_pairs()
+                .any(|(key, _)| !keys.contains(&key.as_ref()))
+        {
+            return Err(blocked());
+        }
+        Ok(Self {
+            url,
+            cookie: None,
+            method: Method::GET,
+            body: None,
+            csrf: None,
+        })
+    }
+
     fn validate(url: &Url) -> Result<(), AppError> {
         if url.scheme() != "https"
             || !url.username().is_empty()
@@ -165,6 +216,7 @@ impl Request {
                         | "groups.roblox.com"
                         | "apis.roblox.com"
                         | "catalog.roblox.com"
+                        | "games.roblox.com"
                 )
             )
         {
@@ -193,7 +245,7 @@ impl Request {
 fn blocked() -> AppError {
     AppError::new(
         "destination_blocked",
-        "The request is not a supported Dashboard route.",
+        "The request is not a supported Roblox route.",
         "Arbitrary endpoints, credentials in URLs, and authentication fallback are not supported.",
     )
 }
