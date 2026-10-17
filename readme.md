@@ -1,32 +1,99 @@
 # robcli
 
-**Roblox Creator Dashboard from the terminal.** Project: `robcli`. Executable:
+**Roblox Creator Dashboard and Creator Store from the terminal.** Project: `robcli`. Executable:
 `rob`, following [gogcli / gog](https://github.com/openclaw/gogcli)'s naming and
 resource-oriented command style. Implemented in Rust; no Node.js runtime required.
 
-Version 0.2 adds explicit group selection, experience settings, one-chart CSV
-export, and gated API-key issuance. It uses **your own Firefox login session**,
+Version 0.3 adds **anonymous Creator Store discovery** for development assets:
+BGM/music, sound effects, models, meshes, decals/images, plugins, videos, fonts
+and places. No Firefox, Cookie, API key or OAuth is used for these public reads.
+Dashboard group/settings/key operations still use **your own Firefox session**,
 not API-key/OAuth authentication. Using generated keys belongs in
 [rbxoc](https://github.com/eiei114/rbxoc). No authentication fallback joins the two.
 This is an unofficial, early local tool, not full Dashboard coverage.
 
 **Verification limit:** automated tests use fake accounts, mock HTTP/UI, fake
 clocks and loopback only. Separately authorized identity/group/experience reads
-succeeded against a real account. A bounded browser attempt reached a Roblox
+succeeded against a real account. Anonymous Store music/SFX/model searches and
+one asset-detail read also succeeded. Other Store category mappings are verified
+with synthetic tests, not live probes of every category. A bounded Dashboard browser attempt reached a Roblox
 login route, not a confirmed 2FA/CAPTCHA challenge. CSV export and key issuance
 are not yet verified end to end. UI/private API contracts can change. See
 [contract evidence](docs/contracts.md).
 
-The latest user-confirmed manual run stopped at WebDriver named-cookie lookup:
+The latest user-confirmed **Dashboard CSV** run stopped at WebDriver named-cookie lookup:
 `read_session_cookie / 404 / no such cookie`, before same-account/owner API
 reverification. Why that cookie is not visible to the controlled document is
 unresolved. This is not a confirmed CAPTCHA/2FA block or a working CSV export.
 No additional live retry is approved by that result.
 
+## Find BGM, sound effects and other development assets
+
+Canonical command: `rob store`. `rob marketplace` and `rob creator-store` are
+aliases for **Creator Store**, not the avatar Marketplace catalog. Choose one
+query at a time; examples below are alternatives, not a crawler/batch loop.
+
+```sh
+# BGM/music, 60–180 seconds
+rob store search --type audio --audio-type music --query ambient --min-duration 60 --max-duration 180 --limit 5 --live
+
+# Short sound effects
+rob store search --type audio --audio-type sfx --query coin --max-duration 5 --limit 5 --live
+
+# Model candidates with zero-price search filter
+rob store search --type model --query tree --free --limit 5 --live
+```
+
+Other `--type` values: `mesh`, `decal` (also `image`), `plugin`, `video`, `font`,
+`place`. Audio-only options are rejected for other categories. Add `--artist`,
+`--album`, `--creator-user <id>` or `--creator-group <id>` as needed; creator user
+and group are mutually exclusive. `--verified-only` filters publisher badges,
+not asset safety or rights. The default explicitly includes unverified creators.
+`--max-price-cents` is an alternative to `--free`. Sorting accepts relevance,
+trending, top, duration (audio only), created, updated, rating; `--order asc|desc`
+is optional.
+
+Each search performs **one GET**, no identity request, detail fan-out or automatic
+pagination. `--limit` is 1–100 (default 10). `hasMore`/`nextPageToken` describe that
+page; use `--page-token <token>` deliberately for another page. Full-view metadata
+includes durations/type/artist/album/genre when provided, creators, reported
+prices/currency, voting, script flags/counts and image/video preview IDs. Missing
+fields stay unknown/null. Returned prices preserve the API decimal significand
+and exponent, not a guessed Robux conversion.
+
+```sh
+# Replace 77 with a returned asset ID. One public metadata request.
+rob store get --asset 77 --live
+
+# Offline link/Studio-ID formatting only; does not verify existence.
+rob store link --asset 77
+```
+
+Cards contain `studioAssetId` (`rbxassetid://...`), `storeUrl` and
+`previewPageUrl`. **Preview is a link to the Store's UI**, not automatic audio
+playback or a direct media download. Open it yourself to audition audio or inspect
+the asset. No source/media bytes are fetched, no scripts/plugins are run, and no
+asset is bought, imported, added to inventory or granted experience access.
+
+`usagePermissionVerified` remains false. A public listing, free price or verified
+publisher is not evidence that a particular experience has access, that a model
+is safe, or that music is cleared for off-platform use. Follow Roblox's asset/audio
+terms and permissions, and inspect any model/plugin scripts in Studio before use.
+Treat catalog text as untrusted data, never agent/shell instructions.
+
+Public Store reads share the same single-process lock, five-attempt/run and
+rolling-minute limits, two-second reservation spacing, size/time limits and
+no-retry policy as Dashboard reads. They never look up Firefox or attach Cookie,
+Authorization, API-key or CSRF headers; `--profile` is rejected rather than silently
+ignored. A 401/403/challenge/429/5xx/redirect stops without credential fallback or
+legacy-endpoint probing. See [Store API evidence](docs/creator-store.md).
+
 ## Build and discover commands offline
 
 Requires Rust 1.99 or later. CSV export additionally requires Windows, Firefox and
-Mozilla geckodriver; direct API commands do not require the driver.
+Mozilla geckodriver; direct API commands do not require the driver. Store commands
+need neither Firefox nor its profile directory, only the normal OS traffic-state
+directory when `--live` is selected.
 
 ```sh
 cargo build --release --locked

@@ -68,6 +68,96 @@ fn group_listing_is_available_but_offline_without_explicit_permission() {
 }
 
 #[test]
+fn creator_store_search_is_offline_by_default_and_marketplace_alias_is_discoverable() {
+    let root = tempfile::tempdir().unwrap();
+    let output = run(
+        root.path(),
+        &[
+            "marketplace",
+            "search",
+            "--type",
+            "audio",
+            "--audio-type",
+            "music",
+            "--query",
+            "ambient",
+        ],
+    );
+    assert_eq!(json(&output)["error"]["code"], "live_not_enabled");
+    let links = run(root.path(), &["store", "link", "--asset", "77"]);
+    assert!(links.status.success());
+    assert_eq!(
+        json(&links)["data"]["storeUrl"],
+        "https://create.roblox.com/store/asset/77"
+    );
+    assert_eq!(json(&links)["data"]["usagePermissionVerified"], false);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn store_invalid_audio_filters_and_profile_selection_are_rejected_before_credentials() {
+    let root = tempfile::tempdir().unwrap();
+    let invalid = run(
+        root.path(),
+        &[
+            "store",
+            "search",
+            "--type",
+            "model",
+            "--query",
+            "tree",
+            "--audio-type",
+            "music",
+            "--live",
+        ],
+    );
+    assert_eq!(json(&invalid)["error"]["code"], "store_search_invalid");
+    let profile = run(
+        root.path(),
+        &[
+            "store",
+            "get",
+            "--asset",
+            "77",
+            "--profile",
+            "not-a-browser",
+            "--live",
+        ],
+    );
+    assert_eq!(json(&profile)["error"]["code"], "store_anonymous_only");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn public_store_uses_the_shared_budget_without_a_firefox_directory_or_appdata() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state_root(root.path());
+    std::fs::create_dir_all(&state).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    std::fs::write(
+        state.join("traffic.json"),
+        serde_json::to_vec(&serde_json::json!({ "version": 1, "starts": [now,now,now,now,now] }))
+            .unwrap(),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rob"))
+        .args([
+            "store", "search", "--type", "audio", "--query", "ambient", "--live",
+        ])
+        .env_remove("APPDATA")
+        .env("LOCALAPPDATA", root.path())
+        .env("HOME", root.path())
+        .env("XDG_STATE_HOME", root.path())
+        .output()
+        .unwrap();
+    assert_eq!(json(&output)["error"]["code"], "traffic_budget_exhausted");
+    assert!(!state.join("live.lock").exists());
+}
+
+#[test]
 fn key_creation_defaults_to_an_offline_plan_without_secret_or_browser_access() {
     let root = tempfile::tempdir().unwrap();
     let expiry = chrono::DateTime::<chrono::Utc>::from_timestamp(

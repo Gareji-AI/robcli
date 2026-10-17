@@ -1,10 +1,10 @@
 [package]
 name = "robcli"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
-description = "Session-backed Roblox Creator Dashboard CLI with bounded reads and gated key issuance"
+description = "Roblox Creator Dashboard and public Creator Store CLI with bounded reads and gated writes"
 
 [[bin]]
 name = "rob"

@@ -16,6 +16,30 @@ pub(crate) struct Locations {
 }
 
 impl Locations {
+    /// Public Creator Store reads need only shared traffic state, not Firefox.
+    pub fn traffic_state() -> Result<PathBuf, AppError> {
+        fn path(key: &str) -> Result<PathBuf, AppError> {
+            std::env::var_os(key).filter(|value| !value.is_empty()).map(PathBuf::from)
+                .ok_or_else(|| AppError::new("local_paths_missing", "Cannot locate the normal OS user state directory.", "Set up the OS user directories. No browser or credential is required for public Store reads."))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Ok(path("LOCALAPPDATA")?.join("robcli/traffic"))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Ok(path("HOME")?.join("Library/Application Support/robcli/traffic"))
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            let root = match std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
+                Some(value) => PathBuf::from(value),
+                None => path("HOME")?.join(".local/state"),
+            };
+            Ok(root.join("robcli/traffic"))
+        }
+    }
+
     pub fn discover() -> Result<Self, AppError> {
         fn env_path(key: &str) -> Result<PathBuf, AppError> {
             std::env::var_os(key)
@@ -27,7 +51,7 @@ impl Locations {
         {
             Ok(Self {
                 firefox: env_path("APPDATA")?.join("Mozilla/Firefox"),
-                state: env_path("LOCALAPPDATA")?.join("robcli/traffic"),
+                state: Self::traffic_state()?,
             })
         }
         #[cfg(target_os = "macos")]
@@ -35,19 +59,15 @@ impl Locations {
             let home = env_path("HOME")?;
             Ok(Self {
                 firefox: home.join("Library/Application Support/Firefox"),
-                state: home.join("Library/Application Support/robcli/traffic"),
+                state: Self::traffic_state()?,
             })
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         {
             let home = env_path("HOME")?;
-            let state = std::env::var_os("XDG_STATE_HOME")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".local/state"));
             Ok(Self {
                 firefox: home.join(".mozilla/firefox"),
-                state: state.join("robcli/traffic"),
+                state: Self::traffic_state()?,
             })
         }
     }

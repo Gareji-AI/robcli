@@ -12,7 +12,7 @@ const MAX_BODY_BYTES: u64 = 2 * 1024 * 1024;
 
 pub(crate) struct Request {
     url: Url,
-    cookie: HeaderValue,
+    cookie: Option<HeaderValue>,
     method: Method,
     body: Option<serde_json::Value>,
     csrf: Option<HeaderValue>,
@@ -44,7 +44,7 @@ impl Request {
         }
         Ok(Self {
             url,
-            cookie,
+            cookie: Some(cookie),
             method: Method::GET,
             body: None,
             csrf: None,
@@ -65,10 +65,56 @@ impl Request {
         Self::validate(&url)?;
         Ok(Self {
             url,
-            cookie,
+            cookie: Some(cookie),
             method: Method::POST,
             body: Some(body),
             csrf,
+        })
+    }
+
+    /// Public Creator Store reads deliberately have no authentication headers.
+    /// This constructor cannot address Dashboard/private APIs or make a write.
+    pub fn creator_store(url: Url) -> Result<Self, AppError> {
+        Self::validate(&url)?;
+        let search = url.path() == "/toolbox-service/v2/assets:search";
+        let detail = url
+            .path()
+            .strip_prefix("/toolbox-service/v2/assets/")
+            .and_then(|id| id.parse::<u64>().ok())
+            .is_some_and(|id| id > 0 && id <= i64::MAX as u64);
+        const KEYS: &[&str] = &[
+            "searchCategoryType",
+            "query",
+            "maxPageSize",
+            "searchView",
+            "sortCategory",
+            "sortDirection",
+            "includeOnlyVerifiedCreators",
+            "audioTypes",
+            "audioMinDurationSeconds",
+            "audioMaxDurationSeconds",
+            "audioArtist",
+            "audioAlbum",
+            "userId",
+            "groupId",
+            "maxPriceCents",
+            "pageToken",
+        ];
+        if url.host_str() != Some("apis.roblox.com")
+            || (!search && !detail)
+            || (detail && url.query().is_some())
+            || url
+                .query_pairs()
+                .any(|(key, _)| !KEYS.contains(&key.as_ref()))
+        {
+            return Err(blocked());
+        }
+        Ok(Self {
+            url,
+            cookie: None,
+            method: Method::GET,
+            body: None,
+            csrf: None,
         })
     }
 
@@ -77,6 +123,7 @@ impl Request {
             || !url.username().is_empty()
             || url.password().is_some()
             || url.port().is_some()
+            || url.fragment().is_some()
             || !matches!(
                 url.host_str(),
                 Some(
@@ -104,7 +151,8 @@ impl Request {
     #[cfg(test)]
     pub fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({ "method": self.method.as_str(), "path": self.url.path(), "body": self.body,
-            "csrfAttached": self.csrf.is_some(), "cookieSensitive": self.cookie.is_sensitive() })
+            "csrfAttached": self.csrf.is_some(), "cookieAttached": self.cookie.is_some(),
+            "cookieSensitive": self.cookie.as_ref().is_some_and(HeaderValue::is_sensitive) })
     }
 }
 
@@ -167,8 +215,10 @@ impl Transport for HttpsTransport {
         let mut builder = self
             .client
             .request(request.method, request.url)
-            .header(ACCEPT, "application/json")
-            .header(COOKIE, request.cookie);
+            .header(ACCEPT, "application/json");
+        if let Some(cookie) = request.cookie {
+            builder = builder.header(COOKIE, cookie);
+        }
         if let Some(body) = request.body {
             builder = builder.header(CONTENT_TYPE, "application/json").json(&body);
         }
@@ -238,6 +288,70 @@ mod tests {
     use crate::auth::SessionCookie;
 
     #[test]
+    fn public_store_requests_cannot_receive_a_cookie_or_access_private_routes() {
+        let url = Url::parse("https://apis.roblox.com/toolbox-service/v2/assets:search?searchCategoryType=Audio&query=ambient").unwrap();
+        let request = Request::creator_store(url.clone()).unwrap();
+        assert!(request.cookie.is_none());
+        assert!(request.csrf.is_none());
+        assert_eq!(request.method, Method::GET);
+        assert!(Request::new(url, SessionCookie::synthetic().header().unwrap()).is_err());
+        for url in [
+            "https://users.roblox.com/v1/users/authenticated",
+            "https://apis.roblox.com/cloud-authentication/v1/apiKey",
+            "https://apis.roblox.com/toolbox-service/v1/saves",
+            "https://apis.roblox.com/toolbox-service/v2/assets/77?token=private",
+            "https://apis.roblox.com/toolbox-service/v2/assets:search?cookie=private",
+            "https://apis.roblox.com/toolbox-service/v2/assets/0",
+        ] {
+            assert!(Request::creator_store(Url::parse(url).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn anonymous_transport_sends_no_authentication_headers_on_the_wire() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut bytes = [0u8; 4096];
+            let count = socket.read(&mut bytes).unwrap();
+            let request = String::from_utf8_lossy(&bytes[..count]).to_ascii_lowercase();
+            assert!(request.starts_with("get / http/1.1"));
+            for header in [
+                "\r\ncookie:",
+                "\r\nauthorization:",
+                "\r\nx-api-key:",
+                "\r\nx-csrf-token:",
+            ] {
+                assert!(!request.contains(header));
+            }
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            )
+            .unwrap();
+        });
+        // Only this loopback unit test bypasses the fixed production HTTPS routes.
+        let mut transport = HttpsTransport {
+            client: client(false).unwrap(),
+        };
+        let response = transport
+            .send(Request {
+                url,
+                cookie: None,
+                method: Method::GET,
+                body: None,
+                csrf: None,
+            })
+            .unwrap();
+        assert_eq!(response.status, 200);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn rejects_other_hosts_http_ports_and_embedded_credentials() {
         for url in [
             "http://users.roblox.com/v1/users/authenticated",
@@ -280,7 +394,7 @@ mod tests {
         let response = transport
             .send(Request {
                 url,
-                cookie: SessionCookie::synthetic().header().unwrap(),
+                cookie: Some(SessionCookie::synthetic().header().unwrap()),
                 method: Method::GET,
                 body: None,
                 csrf: None,

@@ -5,17 +5,17 @@ use std::path::PathBuf;
 #[command(
     name = "rob",
     version,
-    about = "Session-backed Roblox Creator Dashboard CLI"
+    about = "Roblox Creator Dashboard and public Creator Store CLI"
 )]
 #[command(
-    after_help = "Offline by default. --live permits one explicitly approved bounded operation.\nAPI-key/OAuth authentication and cookie export are not supported. Key creation is plan-only unless --apply and account confirmation are supplied."
+    after_help = "Offline by default. --live permits one explicitly approved bounded operation.\nCreator Store discovery is anonymous and never reads Firefox credentials. Dashboard operations use the selected Firefox session.\nAPI-key/OAuth authentication and cookie export are not supported. Key creation is plan-only unless --apply and account confirmation are supplied."
 )]
 pub(crate) struct Cli {
     /// Explicitly allow one bounded live probe. Never use in a test loop.
     #[arg(long, global = true)]
     pub live: bool,
 
-    /// Select an existing Firefox profile by its name (not a cookie value).
+    /// Dashboard only: select an existing Firefox profile by name, not a cookie value.
     #[arg(long, global = true)]
     pub profile: Option<String>,
 
@@ -29,6 +29,12 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Discover development assets in Creator Store, not avatar Marketplace.
+    #[command(visible_aliases = ["marketplace", "creator-store"])]
+    Store {
+        #[command(subcommand)]
+        command: StoreCommand,
+    },
     /// Check the signed-in Firefox account through a read-only API.
     Auth {
         #[command(subcommand)]
@@ -69,6 +75,15 @@ pub(crate) enum Command {
 impl Command {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Store {
+                command: StoreCommand::Search(_),
+            } => "store search",
+            Self::Store {
+                command: StoreCommand::Get { .. },
+            } => "store get",
+            Self::Store {
+                command: StoreCommand::Link { .. },
+            } => "store link",
             Self::Auth { .. } => "auth check",
             Self::Whoami => "whoami",
             Self::Groups { .. } => "groups list",
@@ -89,6 +104,22 @@ impl Command {
             Self::Schema => "schema",
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum StoreCommand {
+    /// One anonymous Creator Store search page, without detail fan-out.
+    Search(Box<crate::store::Search>),
+    /// Read public metadata for one Creator Store asset, never its source/media bytes.
+    Get {
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
+        asset: u64,
+    },
+    /// Offline Studio ID and Store/preview-page links; does not check existence.
+    Link {
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
+        asset: u64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
