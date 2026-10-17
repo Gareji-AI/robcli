@@ -148,3 +148,12 @@ labels, never message/stacktrace/URL/credential output. Synthetic protocol tests
 distinguish cookie and script errors and reject unrecognized private strings.
 Further real-account diagnosis still requires a separately confirmed human run;
 it is not an automatic retry or a claim that authentication/CSV is fixed.
+
+The final separately approved 0.2.3 human run reached the exact target probe,
+then reported `read_session_cookie`, local driver HTTP 404, W3C `no such cookie`.
+Thus named-cookie lookup in the current controlled document is the observed
+blocker, before browser-account/owner API reverification. This is not evidence of
+a 2FA/CAPTCHA refusal, nor proof about cookies in other origins, windows or
+partitions. Do not infer the cookie's storage scope or copy other credentials
+without further evidence. No CSV completed. The user authorized one final run;
+no additional live attempt followed this result.

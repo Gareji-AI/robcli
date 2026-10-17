@@ -17,6 +17,12 @@ login route, not a confirmed 2FA/CAPTCHA challenge. CSV export and key issuance
 are not yet verified end to end. UI/private API contracts can change. See
 [contract evidence](docs/contracts.md).
 
+The latest user-confirmed manual run stopped at WebDriver named-cookie lookup:
+`read_session_cookie / 404 / no such cookie`, before same-account/owner API
+reverification. Why that cookie is not visible to the controlled document is
+unresolved. This is not a confirmed CAPTCHA/2FA block or a working CSV export.
+No additional live retry is approved by that result.
+
 ## Build and discover commands offline
 
 Requires Rust 1.99 or later. CSV export additionally requires Windows, Firefox and
