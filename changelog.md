@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1
+
+- Adopt the framed, transparent-background project icon and display it in the
+  README; include the icon in the crate archive.
+- No command, authentication, networking or traffic-limit behavior changes.
+
 ## 0.6.0
 
 First public release. Package: `robcli`. Executable: `rob`.
