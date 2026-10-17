@@ -384,6 +384,66 @@ fn manual_login_gate(options: &ExportOptions, expected_user: u64) -> Result<(), 
     }
 }
 
+fn control_failure(action: &str, phase: &str, status: Option<u16>, kind: &str) -> AppError {
+    let select = |value: &str, allowed: &[&str]| {
+        if allowed.contains(&value) {
+            value.to_owned()
+        } else {
+            "unclassified".to_owned()
+        }
+    };
+    let mut error = browser_error(
+        "browser_control_failed",
+        "The owned browser action failed. Only fixed protocol categories are reported; no raw driver message is printed.",
+    );
+    error.details = Some(json!({ "browserControl": {
+        "action": select(action, &["navigate", "set_session_cookie", "read_session_cookie", "execute_script", "set_timeouts", "switch_context"]),
+        "phase": select(phase, &["none", "private_attestation", "target-probe", "probe", "menu", "menu-probe", "download"]),
+        "driverHttpStatus": status,
+        "webdriverError": select(kind, &["no such cookie", "no such window", "invalid session id", "javascript error", "invalid argument", "script timeout", "timeout", "unexpected alert open", "unsupported operation", "unknown command", "unknown error", "transport_failed", "response_read_failed", "invalid_response", "body_too_large"])
+    } }));
+    error
+}
+
+fn decode_driver_reply(
+    status: u16,
+    bytes: &[u8],
+    action: &str,
+    phase: &str,
+) -> Result<Value, AppError> {
+    if bytes.len() > 32768 {
+        return Err(control_failure(
+            action,
+            phase,
+            Some(status),
+            "body_too_large",
+        ));
+    }
+    if !(200..300).contains(&status) {
+        #[derive(serde::Deserialize)]
+        struct Reply {
+            value: ErrorValue,
+        }
+        #[derive(serde::Deserialize)]
+        struct ErrorValue {
+            error: String,
+        }
+        // message/stacktrace/data are deliberately ignored, not logged or copied.
+        let reply = serde_json::from_slice::<Reply>(bytes).ok();
+        let kind = reply
+            .as_ref()
+            .map(|reply| reply.value.error.as_str())
+            .unwrap_or("invalid_response");
+        return Err(control_failure(action, phase, Some(status), kind));
+    }
+    let mut value: Value = serde_json::from_slice(bytes)
+        .map_err(|_| control_failure(action, phase, Some(status), "invalid_response"))?;
+    value
+        .get_mut("value")
+        .map(Value::take)
+        .ok_or_else(|| control_failure(action, phase, Some(status), "invalid_response"))
+}
+
 struct LocalDriver {
     _process: OwnedDriver,
     client: reqwest::blocking::Client,
@@ -532,6 +592,23 @@ impl LocalDriver {
     }
 
     fn call(&mut self, method: Method, path: &str, body: Option<Value>) -> Result<Value, AppError> {
+        let action = match path {
+            "url" => "navigate",
+            "cookie" => "set_session_cookie",
+            "cookie/.ROBLOSECURITY" => "read_session_cookie",
+            "execute/sync" => "execute_script",
+            "timeouts" => "set_timeouts",
+            "moz/context" => "switch_context",
+            _ => "unclassified",
+        };
+        let phase = if path == "execute/sync" {
+            body.as_ref()
+                .and_then(|body| body["args"][1].as_str())
+                .unwrap_or("private_attestation")
+                .to_owned()
+        } else {
+            "none".to_owned()
+        };
         let mut request = self.client.request(
             method,
             format!("{}/session/{}/{}", self.base, self.session, path),
@@ -539,25 +616,16 @@ impl LocalDriver {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = request.send().map_err(|_| {
-            browser_error(
-                "browser_control_failed",
-                "The private browser action failed or timed out.",
-            )
-        })?;
-        if !response.status().is_success() {
-            return Err(browser_error(
-                "browser_control_failed",
-                "The private browser refused the action. Raw driver messages are not printed.",
-            ));
-        }
-        let mut value: Value = response.json().map_err(|_| {
-            browser_error(
-                "browser_control_failed",
-                "The private browser returned an invalid response.",
-            )
-        })?;
-        Ok(value["value"].take())
+        let response = request
+            .send()
+            .map_err(|_| control_failure(action, &phase, None, "transport_failed"))?;
+        let status = response.status().as_u16();
+        let mut bytes = zeroize::Zeroizing::new(Vec::new());
+        response
+            .take(32769)
+            .read_to_end(&mut bytes)
+            .map_err(|_| control_failure(action, &phase, Some(status), "response_read_failed"))?;
+        decode_driver_reply(status, &bytes, action, &phase)
     }
 
     fn owned_session_cookie(&mut self) -> Result<SessionCookie, AppError> {
@@ -883,6 +951,30 @@ return {state:'ready'};
 mod tests {
     use super::*;
     use crate::traffic::tests::FakeClock;
+
+    #[test]
+    fn webdriver_failure_distinguishes_cookie_and_script_actions_without_private_messages() {
+        for (kind, action, phase) in [
+            ("no such cookie", "read_session_cookie", "none"),
+            ("javascript error", "execute_script", "target-probe"),
+            ("private-synthetic-value", "execute_script", "probe"),
+        ] {
+            let body = serde_json::to_vec(&json!({"value":{"error":kind,"message":"private-synthetic-value", "stacktrace":"private-synthetic-value"}})).unwrap();
+            let error = decode_driver_reply(404, &body, action, phase).unwrap_err();
+            let output = serde_json::to_value(error).unwrap();
+            assert_eq!(output["details"]["browserControl"]["action"], action);
+            assert_eq!(output["details"]["browserControl"]["phase"], phase);
+            assert_eq!(
+                output["details"]["browserControl"]["webdriverError"],
+                if kind == "private-synthetic-value" {
+                    "unclassified"
+                } else {
+                    kind
+                }
+            );
+            assert!(!output.to_string().contains("private-synthetic-value"));
+        }
+    }
 
     struct NoData {
         calls: Vec<String>,

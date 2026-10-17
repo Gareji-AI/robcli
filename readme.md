@@ -125,6 +125,12 @@ Signals distinguish `login_route`, `challenge_route`, `unexpected_origin`,
 not proof that a CAPTCHA/2FA challenge was issued. No raw URL, query, DOM text,
 iframe address, password, code or cookie is included in these diagnostics.
 Unknown values become `unclassified`; a stop never retries automatically.
+Version 0.2.3 also reports `error.details.browserControl` for local WebDriver
+failures: fixed action/phase labels, local-driver HTTP status and an allowlisted
+W3C error name (for example `no such cookie` or `javascript error`). Driver
+messages/stack traces are not printed. Control replies are limited to 32 KiB and
+their byte buffers are zeroized after decoding. These errors must not be
+misrepresented as Roblox permission or CAPTCHA refusals.
 
 If the regular Firefox account works but the new private browser is sent to
 login, explicitly add `--interactive-login` to the export command. This is a

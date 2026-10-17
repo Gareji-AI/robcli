@@ -139,3 +139,12 @@ authenticated identity, universe-owner read, one CSV click: five total. The
 non-interactive mode instead uses identity, seed, analytics navigation, owner
 read, CSV click: also five. No quota increase, automatic login, retries or
 credential persistence is introduced.
+
+A user-confirmed manual run subsequently stopped with the old generic
+`browser_control_failed`, without a completed CSV. The exact control action was
+not captured, so neither a missing cookie nor a JavaScript error is established.
+Version 0.2.3 adds bounded decoding of fixed W3C error names and action/phase
+labels, never message/stacktrace/URL/credential output. Synthetic protocol tests
+distinguish cookie and script errors and reject unrecognized private strings.
+Further real-account diagnosis still requires a separately confirmed human run;
+it is not an automatic retry or a claim that authentication/CSV is fixed.
