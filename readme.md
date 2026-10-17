@@ -1,6 +1,6 @@
 # robcli
 
-**Roblox Creator Dashboard and Creator Store from the terminal.** Project: `robcli`. Executable:
+**Roblox Dashboard, Creator Store and avatar Marketplace from the terminal.** Project: `robcli`. Executable:
 `rob`, following [gogcli / gog](https://github.com/openclaw/gogcli)'s naming and
 resource-oriented command style. Implemented in Rust; no Node.js runtime required.
 
@@ -12,9 +12,17 @@ not API-key/OAuth authentication. Using generated keys belongs in
 [rbxoc](https://github.com/eiei114/rbxoc). No authentication fallback joins the two.
 This is an unofficial, early local tool, not full Dashboard coverage.
 
+Version 0.4 adds `rob avatar search` (alias `catalog`) for avatar clothing,
+accessories and bundles. It is separate from `rob store` development assets.
+Search results include typed IDs, Robux prices, catalog/preview-page links and
+`HumanoidDescription` appearance hints. These are **metadata, not an actual
+try-on, purchase, ownership grant or account-avatar change**.
+
 **Verification limit:** automated tests use fake accounts, mock HTTP/UI, fake
 clocks and loopback only. Separately authorized identity/group/experience reads
-succeeded against a real account. Anonymous Store music/SFX/model searches and
+succeeded against a real account. Anonymous avatar Jacket search returned 10
+items; a separate experimental metadata POST was refused with 403 and is **not
+shipped**. No live probes followed that refusal. Anonymous Store music/SFX/model searches and
 one asset-detail read also succeeded. Other Store category mappings are verified
 with synthetic tests, not live probes of every category. A bounded Dashboard browser attempt reached a Roblox
 login route, not a confirmed 2FA/CAPTCHA challenge. CSV export and key issuance
@@ -26,6 +34,57 @@ The latest user-confirmed **Dashboard CSV** run stopped at WebDriver named-cooki
 reverification. Why that cookie is not visible to the controlled document is
 unresolved. This is not a confirmed CAPTCHA/2FA block or a working CSV export.
 No additional live retry is approved by that result.
+
+## Search avatar clothes and get the right kind of ID
+
+```sh
+rob avatar search --type jacket --query black --live
+rob avatar search --type classic-shirt --query black --max-price 100 --live
+rob avatar search --type bundles --query shoes --live
+```
+
+These are alternative one-page queries, not a loop. Default type is `clothing`.
+Classic clothes are `classic-shirt`, `classic-tshirt`, `classic-pants`; layered
+clothes are `shirt`, `tshirt`, `pants`, `jacket`, `sweater`, `shorts`, `dress-skirt`,
+`left-shoe`, `right-shoe`. Accessories include `hat`, `hair`, face/neck/shoulder/
+front/back/waist accessories; `accessories`, `bundles` and `all` are broader filters.
+Use `--creator-user` or `--creator-group`, `--min-price`/`--max-price` (in **Robux**,
+not Store cents), `--free`, `--sort`, `--period`, or `--include-offsale` as needed.
+
+Only 10/28/30 results per page are accepted (default 10); `--cursor` deliberately
+requests another page. No automatic pagination or per-result detail request.
+`--profile` is rejected: these are public anonymous GETs with the same traffic
+limits and no Cookie/API-key/OAuth/CSRF or Firefox access.
+
+```sh
+# Replace 77 with the correctly typed ID from a result. Offline links only.
+rob avatar link --asset 77
+rob avatar link --bundle 77
+```
+
+**Asset IDs and bundle IDs are not interchangeable.** Bundles link to `/bundles/`
+and cannot be passed as one clothing asset. Classic shirt/pants/T-shirt hints
+refer to `HumanoidDescription.Shirt/Pants/GraphicTShirt`, which expect the catalog
+clothing asset, **not** a Decal/Image texture ID. Layered and rigid accessory
+hints use `SetAccessories`, retaining existing accessories and respecting layer
+order; these hints have not been tested in Studio.
+
+In-experience `HumanoidDescription` appearance customization is separate from
+owning an item. Supported items can be previewed on a character/preview rig, but
+rendering/rig/moderation/permission eligibility is not guaranteed for every ID.
+Changing that appearance does not itself save the Roblox account avatar or grant
+inventory ownership. Saving an avatar/outfit also does not grant unowned catalog
+items; use Roblox's normal user-confirmed save/purchase flows where appropriate.
+The CLI performs none of those operations and never claims ownership or preview
+eligibility. Persisting IDs in your own game's settings is a different concept
+from owning those items on Roblox.
+
+See [avatar API evidence and Studio-side examples](docs/avatar-marketplace.md).
+The existing `marketplace` alias remains `store` for compatibility; use `avatar`
+or `catalog` for avatar items. No per-ID `avatar get` command is offered: the
+anonymous experimental detail endpoint returned 403, so this release relies on
+the detailed search response instead of retrying, adding credentials or probing
+alternate endpoints.
 
 ## Find BGM, sound effects and other development assets
 

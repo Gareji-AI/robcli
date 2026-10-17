@@ -5,10 +5,10 @@ use std::path::PathBuf;
 #[command(
     name = "rob",
     version,
-    about = "Roblox Creator Dashboard and public Creator Store CLI"
+    about = "Roblox Creator Dashboard, Creator Store and avatar catalog CLI"
 )]
 #[command(
-    after_help = "Offline by default. --live permits one explicitly approved bounded operation.\nCreator Store discovery is anonymous and never reads Firefox credentials. Dashboard operations use the selected Firefox session.\nAPI-key/OAuth authentication and cookie export are not supported. Key creation is plan-only unless --apply and account confirmation are supplied."
+    after_help = "Offline by default. --live permits one explicitly approved bounded operation.\nCreator Store and avatar catalog discovery are anonymous and never read Firefox credentials. Dashboard operations use the selected Firefox session.\nAvatar commands do not purchase, apply or save avatar appearance. API-key/OAuth authentication and cookie export are not supported. Key creation is plan-only unless --apply and account confirmation are supplied."
 )]
 pub(crate) struct Cli {
     /// Explicitly allow one bounded live probe. Never use in a test loop.
@@ -29,6 +29,12 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Discover avatar clothing/accessories/bundles; never change the account avatar.
+    #[command(visible_alias = "catalog")]
+    Avatar {
+        #[command(subcommand)]
+        command: AvatarCommand,
+    },
     /// Discover development assets in Creator Store, not avatar Marketplace.
     #[command(visible_aliases = ["marketplace", "creator-store"])]
     Store {
@@ -75,6 +81,12 @@ pub(crate) enum Command {
 impl Command {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Avatar {
+                command: AvatarCommand::Search(_),
+            } => "avatar search",
+            Self::Avatar {
+                command: AvatarCommand::Link(_),
+            } => "avatar link",
             Self::Store {
                 command: StoreCommand::Search(_),
             } => "store search",
@@ -104,6 +116,14 @@ impl Command {
             Self::Schema => "schema",
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AvatarCommand {
+    /// One public avatar Marketplace page, not Creator Store development assets.
+    Search(Box<crate::avatar::Search>),
+    /// Offline catalog/try-on-page links, with an explicit ID namespace.
+    Link(crate::avatar::Target),
 }
 
 #[derive(Debug, Subcommand)]

@@ -118,6 +118,39 @@ impl Request {
         })
     }
 
+    pub fn avatar_search(url: Url) -> Result<Self, AppError> {
+        Self::validate(&url)?;
+        const KEYS: &[&str] = &[
+            "AssetTypeIds",
+            "BundleTypeIds",
+            "Keyword",
+            "limit",
+            "cursor",
+            "SortType",
+            "SortAggregation",
+            "CreatorType",
+            "CreatorTargetId",
+            "MinPrice",
+            "MaxPrice",
+            "IncludeNotForSale",
+        ];
+        if url.host_str() != Some("catalog.roblox.com")
+            || url.path() != "/v2/search/items/details"
+            || url
+                .query_pairs()
+                .any(|(key, _)| !KEYS.contains(&key.as_ref()))
+        {
+            return Err(blocked());
+        }
+        Ok(Self {
+            url,
+            cookie: None,
+            method: Method::GET,
+            body: None,
+            csrf: None,
+        })
+    }
+
     fn validate(url: &Url) -> Result<(), AppError> {
         if url.scheme() != "https"
             || !url.username().is_empty()
@@ -131,12 +164,13 @@ impl Request {
                         | "develop.roblox.com"
                         | "groups.roblox.com"
                         | "apis.roblox.com"
+                        | "catalog.roblox.com"
                 )
             )
         {
             return Err(AppError::new(
                 "destination_blocked",
-                "Only the allowlisted Roblox HTTPS API hosts may receive the session.",
+                "Only the allowlisted Roblox HTTPS API hosts may be addressed.",
                 "Use a supported command. Arbitrary URLs, redirects, and API base-URL overrides are not supported.",
             ));
         }
@@ -286,6 +320,25 @@ mod tests {
 
     use super::*;
     use crate::auth::SessionCookie;
+
+    #[test]
+    fn avatar_request_is_an_anonymous_get_and_cannot_reach_metadata_posts_or_writes() {
+        let url=Url::parse("https://catalog.roblox.com/v2/search/items/details?AssetTypeIds=67&Keyword=black&limit=10").unwrap();
+        let request = Request::avatar_search(url.clone()).unwrap();
+        assert!(request.cookie.is_none());
+        assert!(request.csrf.is_none());
+        assert_eq!(request.method, Method::GET);
+        assert!(Request::new(url.clone(), SessionCookie::synthetic().header().unwrap()).is_err());
+        assert!(Request::creator_store(url).is_err());
+        for url in [
+            "https://catalog.roblox.com/v1/catalog/items/details",
+            "https://avatar.roblox.com/v1/avatar/set",
+            "https://catalog.roblox.com/v2/search/items/details?Cookie=secret",
+            "https://users.roblox.com/v1/users/authenticated",
+        ] {
+            assert!(Request::avatar_search(Url::parse(url).unwrap()).is_err());
+        }
+    }
 
     #[test]
     fn public_store_requests_cannot_receive_a_cookie_or_access_private_routes() {

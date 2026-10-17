@@ -95,6 +95,101 @@ fn creator_store_search_is_offline_by_default_and_marketplace_alias_is_discovera
 }
 
 #[test]
+fn avatar_catalog_is_offline_by_default_and_links_keep_asset_bundle_namespaces_separate() {
+    let root = tempfile::tempdir().unwrap();
+    let output = run(
+        root.path(),
+        &["avatar", "search", "--type", "jacket", "--query", "black"],
+    );
+    assert_eq!(json(&output)["error"]["code"], "live_not_enabled");
+    let asset = run(root.path(), &["catalog", "link", "--asset", "77"]);
+    let bundle = run(root.path(), &["avatar", "link", "--bundle", "77"]);
+    assert!(asset.status.success());
+    assert!(bundle.status.success());
+    assert_eq!(
+        json(&asset)["data"]["catalogUrl"],
+        "https://www.roblox.com/catalog/77"
+    );
+    assert_eq!(
+        json(&bundle)["data"]["catalogUrl"],
+        "https://www.roblox.com/bundles/77"
+    );
+    assert_eq!(
+        json(&bundle)["data"]["appearanceHint"]["canUseAsSingleAssetId"],
+        false
+    );
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn avatar_profile_price_and_ambiguous_id_inputs_stop_before_credentials() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = run(
+        root.path(),
+        &[
+            "avatar",
+            "search",
+            "--query",
+            "black",
+            "--profile",
+            "fake",
+            "--live",
+        ],
+    );
+    assert_eq!(json(&profile)["error"]["code"], "avatar_anonymous_only");
+    let price = run(
+        root.path(),
+        &[
+            "avatar",
+            "search",
+            "--query",
+            "black",
+            "--min-price",
+            "100",
+            "--max-price",
+            "10",
+            "--live",
+        ],
+    );
+    assert_eq!(json(&price)["error"]["code"], "avatar_query_invalid");
+    let ambiguous = run(
+        root.path(),
+        &[
+            "avatar", "link", "--asset", "77", "--bundle", "77", "--live",
+        ],
+    );
+    assert_eq!(json(&ambiguous)["error"]["code"], "invalid_arguments");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn avatar_catalog_shares_budget_without_firefox_paths_or_identity_requests() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state_root(root.path());
+    std::fs::create_dir_all(&state).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    std::fs::write(
+        state.join("traffic.json"),
+        serde_json::to_vec(&serde_json::json!({"version":1,"starts":[now,now,now,now,now]}))
+            .unwrap(),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rob"))
+        .args(["avatar", "search", "--query", "black", "--live"])
+        .env_remove("APPDATA")
+        .env("LOCALAPPDATA", root.path())
+        .env("HOME", root.path())
+        .env("XDG_STATE_HOME", root.path())
+        .output()
+        .unwrap();
+    assert_eq!(json(&output)["error"]["code"], "traffic_budget_exhausted");
+    assert!(!state.join("live.lock").exists());
+}
+
+#[test]
 fn store_invalid_audio_filters_and_profile_selection_are_rejected_before_credentials() {
     let root = tempfile::tempdir().unwrap();
     let invalid = run(
