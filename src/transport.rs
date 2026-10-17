@@ -202,6 +202,67 @@ impl Request {
         })
     }
 
+    /// Public profiles/communities only; fixed public filters cannot request private roles/games.
+    pub fn social(url: Url) -> Result<Self, AppError> {
+        Self::validate(&url)?;
+        let numeric = |prefix: &str, suffix: &str| {
+            url.path()
+                .strip_prefix(prefix)
+                .and_then(|s| s.strip_suffix(suffix))
+                .and_then(|s| s.parse::<u64>().ok())
+                .is_some_and(|n| n > 0 && n <= i64::MAX as u64)
+        };
+        let keys: &[&str] = match (url.host_str(), url.path()) {
+            (Some("users.roblox.com"), "/v1/users/search") => &["keyword", "limit", "cursor"],
+            (Some("users.roblox.com"), _) if numeric("/v1/users/", "") => &[],
+            (Some("groups.roblox.com"), "/v1/groups/search") => &["keyword", "limit", "cursor"],
+            (Some("groups.roblox.com"), _) if numeric("/v1/groups/", "") => &[],
+            (Some("groups.roblox.com"), _) if numeric("/v1/groups/", "/roles") => {
+                &["includePrivate"]
+            }
+            (Some("groups.roblox.com"), _) if numeric("/v2/users/", "/groups/roles") => &[
+                "includeLocked",
+                "includeNotificationPreferences",
+                "discoveryType",
+            ],
+            (Some("games.roblox.com"), _)
+                if numeric("/v2/users/", "/games") || numeric("/v2/groups/", "/games") =>
+            {
+                &["accessFilter", "limit", "cursor", "sortOrder"]
+            }
+            _ => return Err(blocked()),
+        };
+        let pairs: Vec<_> = url.query_pairs().collect();
+        if (keys.is_empty() && url.query().is_some())
+            || pairs.iter().any(|(k, _)| !keys.contains(&k.as_ref()))
+            || pairs
+                .iter()
+                .enumerate()
+                .any(|(i, (k, _))| pairs[..i].iter().any(|(other, _)| other == k))
+        {
+            return Err(blocked());
+        }
+        for (key, expected) in [
+            ("includePrivate", "false"),
+            ("includeLocked", "false"),
+            ("includeNotificationPreferences", "false"),
+            ("discoveryType", "0"),
+            ("accessFilter", "Public"),
+            ("sortOrder", "Asc"),
+        ] {
+            if keys.contains(&key) && !pairs.iter().any(|(k, v)| k == key && v == expected) {
+                return Err(blocked());
+            }
+        }
+        Ok(Self {
+            url,
+            cookie: None,
+            method: Method::GET,
+            body: None,
+            csrf: None,
+        })
+    }
+
     fn validate(url: &Url) -> Result<(), AppError> {
         if url.scheme() != "https"
             || !url.username().is_empty()

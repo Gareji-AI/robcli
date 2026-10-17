@@ -5,10 +5,10 @@ use std::path::PathBuf;
 #[command(
     name = "rob",
     version,
-    about = "Roblox Dashboard, public charts, games, Creator Store and avatar catalog CLI"
+    about = "Roblox Dashboard, public profiles, communities, games, charts and catalogs"
 )]
 #[command(
-    after_help = "Offline by default. --live permits one explicitly approved bounded operation.\nCharts, public games, Creator Store and avatar catalog reads are anonymous and never read Firefox credentials. Dashboard operations use the selected Firefox session.\nPublic discovery performs no purchase, media download or creator configuration change. Avatar commands do not apply or save appearance. API-key/OAuth authentication and cookie export are not supported. Key creation is plan-only unless --apply and account confirmation are supplied."
+    after_help = "Offline by default. --live permits one explicitly approved bounded operation.\nUsers, communities, charts, public games, Creator Store and avatar catalog reads are anonymous and never read Firefox credentials. Dashboard operations and the existing groups list use the selected Firefox session.\nPublic discovery performs no purchase, social write, member-roster harvest, media download or creator configuration change. Avatar commands do not apply or save appearance. API-key/OAuth authentication and cookie export are not supported. Key creation is plan-only unless --apply and account confirmation are supplied."
 )]
 pub(crate) struct Cli {
     /// Explicitly allow one bounded live probe. Never use in a test loop.
@@ -29,6 +29,18 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Public profiles/search/creations and reported community memberships.
+    #[command(visible_aliases = ["profiles", "profile"])]
+    Users {
+        #[command(subcommand)]
+        command: UserCommand,
+    },
+    /// Public communities (Groups API), not authenticated group administration.
+    #[command(visible_alias = "community")]
+    Communities {
+        #[command(subcommand)]
+        command: CommunityCommand,
+    },
     /// Public game charts and Music Top 100; anonymous one-page reads.
     Charts {
         #[command(subcommand)]
@@ -92,6 +104,36 @@ pub(crate) enum Command {
 impl Command {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Users {
+                command: UserCommand::Get(_),
+            } => "users get",
+            Self::Users {
+                command: UserCommand::Search(_),
+            } => "users search",
+            Self::Users {
+                command: UserCommand::Communities { .. },
+            } => "users communities",
+            Self::Users {
+                command: UserCommand::Games { .. },
+            } => "users games",
+            Self::Users {
+                command: UserCommand::Link(_),
+            } => "users link",
+            Self::Communities {
+                command: CommunityCommand::Get(_),
+            } => "communities get",
+            Self::Communities {
+                command: CommunityCommand::Search(_),
+            } => "communities search",
+            Self::Communities {
+                command: CommunityCommand::Roles { .. },
+            } => "communities roles",
+            Self::Communities {
+                command: CommunityCommand::Games { .. },
+            } => "communities games",
+            Self::Communities {
+                command: CommunityCommand::Link(_),
+            } => "communities link",
             Self::Charts {
                 command: ChartCommand::Sorts(_),
             } => "charts sorts",
@@ -148,6 +190,56 @@ impl Command {
             Self::Schema => "schema",
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum UserCommand {
+    /// One public profile; does not identify the logged-in browser user.
+    Get(crate::social::UserTarget),
+    /// One keyword-search page; search is not exact identity verification.
+    Search(Box<crate::social::Search>),
+    /// Reported public memberships/roles. No member rosters or notification data.
+    #[command(visible_alias = "groups")]
+    Communities {
+        #[command(flatten)]
+        target: crate::social::UserTarget,
+        /// Local cap for this unpaged API response, not a server page size.
+        #[arg(long, default_value="25", value_parser=clap::value_parser!(u32).range(1..=25))]
+        limit: u32,
+    },
+    /// One page of publicly returned creations, not private projects or player stats.
+    Games {
+        #[command(flatten)]
+        target: crate::social::UserTarget,
+        #[command(flatten)]
+        page: crate::social::Page,
+    },
+    /// Offline profile URL only; does not verify existence or open a browser.
+    Link(crate::social::UserTarget),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum CommunityCommand {
+    /// Public description, owner, counter and available public shout.
+    Get(crate::social::CommunityTarget),
+    /// One community search page. Select an ID explicitly before further reads.
+    Search(Box<crate::social::Search>),
+    /// Public roles only (includePrivate=false), never permissions/member rosters.
+    Roles {
+        #[command(flatten)]
+        target: crate::social::CommunityTarget,
+        #[arg(long, default_value="25", value_parser=clap::value_parser!(u32).range(1..=25))]
+        limit: u32,
+    },
+    /// One page of public community creations, never creator configuration.
+    Games {
+        #[command(flatten)]
+        target: crate::social::CommunityTarget,
+        #[command(flatten)]
+        page: crate::social::Page,
+    },
+    /// Offline community URL only; does not verify existence or open a browser.
+    Link(crate::social::CommunityTarget),
 }
 
 #[derive(Debug, Subcommand)]

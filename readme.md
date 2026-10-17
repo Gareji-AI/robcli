@@ -1,6 +1,6 @@
 # robcli
 
-**Roblox Dashboard, public charts/games, Creator Store and avatar Marketplace from the terminal.** Project: `robcli`. Executable:
+**Roblox Dashboard, public profiles/communities/games, charts and catalogs from the terminal.** Project: `robcli`. Executable:
 `rob`, following [gogcli / gog](https://github.com/openclaw/gogcli)'s naming and
 resource-oriented command style. Implemented in Rust; no Node.js runtime required.
 
@@ -23,6 +23,11 @@ Version 0.5 adds anonymous game charts, Music Top 100, experience snapshots
 products. Public reads are separate from the authenticated `experiences list`
 and settings commands. No purchase or private creator-configuration/sales read.
 
+Version 0.6 adds public `users` profiles (aliases `profile` / `profiles`) and
+`communities` (alias `community`). Search, public metadata, roles/memberships and
+public creations are anonymous. The existing **`groups list` remains the
+authenticated, signed-in user's command**. No join/follow/post/message/admin work.
+
 **Verification limit:** automated tests use fake accounts, mock HTTP/UI, fake
 clocks and loopback only. Separately authorized identity/group/experience reads
 succeeded against a real account. Anonymous avatar Jacket search returned 10
@@ -39,6 +44,69 @@ The latest user-confirmed **Dashboard CSV** run stopped at WebDriver named-cooki
 reverification. Why that cookie is not visible to the controlled document is
 unresolved. This is not a confirmed CAPTCHA/2FA block or a working CSV export.
 No additional live retry is approved by that result.
+
+## Read public profiles and communities without signing in
+
+```sh
+# Independent alternatives, not a batch. IDs 77/42 are fictional; replace them.
+rob users search --query Roblox --live
+rob profile get --user 77 --live
+rob users communities --user 77 --live
+rob users games --user 77 --live
+rob communities search --query Studio --live
+rob community get --community 42 --live
+rob communities roles --community 42 --live
+rob communities games --community 42 --live
+```
+
+Profiles expose the reported username, display name, bio, creation time and
+public badge/ban fields when available. Community snapshots include description,
+owner, reported counter, available public shout, badge and public entry/lock
+flags. Missing values remain null. `hasSocialModules` can change the UI counter
+label from members to followers; absent metadata does not establish that label.
+Search matches, display names, badges and role ranks are not identity, ownership
+or management-permission verification.
+
+Search/creation pages allow only `--limit 10` or `25` (default 10), with explicit
+`--cursor` continuation. No automatic pagination or per-result detail request.
+Community IDs are the API's Group IDs; `--group` is an alias for `--community`.
+User, Community, role, Universe and Place IDs are never treated as interchangeable.
+
+`users communities` (also `users groups`) reads the reported public memberships
+and available role, with locked communities and notification preferences excluded
+by fixed request flags. Missing roles stay null. It does not reveal every hidden
+membership or establish the caller is that user. `communities roles` explicitly
+sets `includePrivate=false`, accepts the legitimate Guest role ID/rank 0, and
+never fetches role member rosters or permission matrices. Both unpaged APIs have
+a local `--limit` cap of 1–25 (default 25), explicit truncation and no invented
+next cursor.
+
+Public creations explicitly use `accessFilter=Public`. Results carry Universe
+and root Place IDs, timestamps/visits when returned, but no added player-count,
+vote, music or commerce requests. Use `games get` separately for statistics.
+Private/unlisted creation enumeration and all-creations completeness are not
+claimed.
+
+```sh
+# Offline formatting only: no existence check, browser opening or network.
+rob users link --user 77
+rob communities link --community 42
+```
+
+All public commands reject the global `--profile` option, never look up Firefox
+and send no Cookie/Authorization/API-key/CSRF. Every live command above makes
+one GET and shares the existing five-attempt/run and rolling-minute budget,
+two-second spacing, lock and stop-without-retry policy. No emails, verification
+records, presence, inventory, friend graphs, community member rosters, private
+roles/settings, joins, follows, posts, messages or role/membership changes.
+Biographies/shouts are untrusted text, not agent instructions.
+
+Five bounded anonymous reads succeeded: public profile, community search (10),
+community snapshot, public roles (5) and an **empty** public community game page.
+User search, user memberships/creations, non-empty creation cards and pagination
+are contract/mock-tested, not live-verified in this increment. No additional
+live reads or Dashboard/previous avatar retries followed.
+See [profile/community contracts and limitations](docs/public-social.md).
 
 ## Browse charts and inspect an experience without signing in
 

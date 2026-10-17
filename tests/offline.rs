@@ -189,6 +189,133 @@ fn all_discovery_reads_obey_shared_budget_without_browser_paths() {
 }
 
 #[test]
+fn profiles_and_communities_are_anonymous_offline_by_default_and_links_are_local() {
+    let root = tempfile::tempdir().unwrap();
+    for args in [
+        &["users", "get", "--user", "77"][..],
+        &["profile", "search", "--query", "Roblox"],
+        &["users", "groups", "--user", "77"],
+        &["users", "games", "--user", "77"],
+        &["communities", "get", "--community", "42"],
+        &["communities", "search", "--query", "Studio"],
+        &["community", "roles", "--group", "42"],
+        &["communities", "games", "--community", "42"],
+    ] {
+        let out = run(root.path(), args);
+        assert_eq!(
+            json(&out)["error"]["code"],
+            "live_not_enabled",
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    let a = json(&run(root.path(), &["profiles", "link", "--user", "77"]));
+    let b = json(&run(root.path(), &["community", "link", "--group", "42"]));
+    assert_eq!(a["data"]["url"], "https://www.roblox.com/users/77/profile");
+    assert_eq!(b["data"]["url"], "https://www.roblox.com/communities/42");
+    assert_eq!(a["data"]["existsChecked"], false);
+    assert_eq!(b["data"]["browserOpened"], false);
+    let schema = json(&run(root.path(), &["schema"]));
+    assert_eq!(schema["data"]["publicSocial"]["includePrivateRoles"], false);
+    assert_eq!(schema["data"]["publicSocial"]["memberRosterHarvest"], false);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn social_profile_ids_page_sizes_and_keywords_fail_before_state_or_credentials() {
+    let root = tempfile::tempdir().unwrap();
+    for (args, code) in [
+        (
+            &[
+                "users",
+                "get",
+                "--user",
+                "77",
+                "--profile",
+                "fake",
+                "--live",
+            ][..],
+            "social_anonymous_only",
+        ),
+        (
+            &["communities", "get", "--community", "0", "--live"],
+            "invalid_arguments",
+        ),
+        (
+            &[
+                "users", "search", "--query", "Roblox", "--limit", "11", "--live",
+            ],
+            "social_query_invalid",
+        ),
+        (
+            &["communities", "search", "--query", "\n", "--live"],
+            "social_query_invalid",
+        ),
+        (
+            &[
+                "communities",
+                "roles",
+                "--community",
+                "42",
+                "--limit",
+                "26",
+                "--live",
+            ],
+            "invalid_arguments",
+        ),
+        (
+            &["communities", "join", "--community", "42", "--live"],
+            "invalid_arguments",
+        ),
+    ] {
+        let out = run(root.path(), args);
+        assert_eq!(json(&out)["error"]["code"], code, "{args:?}");
+    }
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn public_people_and_community_reads_share_real_budget_without_firefox_discovery() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state_root(root.path());
+    std::fs::create_dir_all(&state).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    std::fs::write(
+        state.join("traffic.json"),
+        serde_json::to_vec(&serde_json::json!({"version":1,"starts":[now,now,now,now,now]}))
+            .unwrap(),
+    )
+    .unwrap();
+    for args in [
+        &["users", "get", "--user", "77", "--live"][..],
+        &["users", "communities", "--user", "77", "--live"],
+        &["users", "games", "--user", "77", "--live"],
+        &["users", "search", "--query", "Roblox", "--live"],
+        &["communities", "get", "--community", "42", "--live"],
+        &["communities", "roles", "--community", "42", "--live"],
+        &["communities", "games", "--community", "42", "--live"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_rob"))
+            .args(args)
+            .env_remove("APPDATA")
+            .env("LOCALAPPDATA", root.path())
+            .env("HOME", root.path())
+            .env("XDG_STATE_HOME", root.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            json(&out)["error"]["code"],
+            "traffic_budget_exhausted",
+            "{args:?}"
+        );
+        assert!(!state.join("live.lock").exists());
+    }
+}
+
+#[test]
 fn creator_store_search_is_offline_by_default_and_marketplace_alias_is_discoverable() {
     let root = tempfile::tempdir().unwrap();
     let output = run(
