@@ -1,5 +1,9 @@
 # robcli
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/eiei114/robcli/main/assets/icon.png" alt="robcli icon" width="160" height="160">
+</p>
+
 [![CI](https://github.com/eiei114/robcli/actions/workflows/ci.yml/badge.svg)](https://github.com/eiei114/robcli/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/robcli.svg)](https://crates.io/crates/robcli)
 [![Downloads](https://img.shields.io/crates/d/robcli.svg)](https://crates.io/crates/robcli)
