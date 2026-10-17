@@ -101,6 +101,9 @@ pub(crate) enum AnalyticsCommand {
         chart: String,
         #[arg(long)]
         output: PathBuf,
+        /// Explicit group owner, independently verified even when Dashboard omits groupId.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        group: Option<u64>,
         /// Path to Mozilla geckodriver. Otherwise use the OS-local robcli tools directory or PATH.
         #[arg(long)]
         driver: Option<PathBuf>,

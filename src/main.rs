@@ -38,12 +38,14 @@ fn run(cli: Cli) -> Result<Value, AppError> {
                 chart,
                 output,
                 interactive_login,
+                group,
                 ..
             },
     } = &cli.command
     {
         Some(
             browser::ExportOptions::validate(url, chart, output)?
+                .with_group(*group)?
                 .with_interactive_login(*interactive_login),
         )
     } else {
@@ -183,7 +185,7 @@ fn run(cli: Cli) -> Result<Value, AppError> {
         let cookie = api.into_cookie();
         data["csv"] = browser::export(
             &options,
-            &cookie,
+            cookie,
             browser_driver.as_ref().unwrap(),
             user_id,
             &mut guard,

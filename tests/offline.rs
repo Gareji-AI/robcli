@@ -131,7 +131,7 @@ fn browser_page_loading_needs_separate_consent_before_any_credential_access() {
             "analytics",
             "export",
             "--url",
-            "https://create.roblox.com/dashboard/creations/experiences/77/analytics/retention",
+            "https://create.roblox.com/dashboard/creations/experiences/77/analytics/retention?annotation=Benchmark",
             "--chart",
             "Day 1 retention",
             "--output",
@@ -161,9 +161,34 @@ fn interactive_login_still_requires_live_before_reading_credentials_or_opening_f
             "--output",
             root.path().join("out.csv").to_str().unwrap(),
             "--interactive-login",
+            "--group",
+            "42",
         ],
     );
     assert_eq!(json(&output)["error"]["code"], "live_not_enabled");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn contradictory_analytics_owner_is_rejected_before_browser_credentials() {
+    let root = tempfile::tempdir().unwrap();
+    let output = run(
+        root.path(),
+        &[
+            "analytics",
+            "export",
+            "--url",
+            "https://create.roblox.com/dashboard/creations/experiences/77/analytics/retention?groupId=42",
+            "--chart",
+            "Day 1 retention",
+            "--output",
+            root.path().join("out.csv").to_str().unwrap(),
+            "--group",
+            "43",
+            "--live",
+        ],
+    );
+    assert_eq!(json(&output)["error"]["code"], "analytics_owner_conflict");
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
 }
 

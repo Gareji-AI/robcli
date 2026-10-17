@@ -117,3 +117,25 @@ Additional identity verification counts within the same hard request budget.
 Different accounts/targets stop before CSV. Browser-managed user login traffic
 is not represented as five total HTTP requests. Complete manual authentication
 and CSV download have not yet been confirmed end to end.
+
+## Canonical URL and owner verification correction
+
+A user-confirmed Retention URL has the same universe/tab path, no `groupId`, and
+`annotation=Benchmark`. Treating query-group presence as mandatory produced a
+false target mismatch after the user completed login. A synthetic reproduction
+failed with the production 0.2.1 script and passes with 0.2.2.
+
+Version 0.2.2 accepts only the fixed Benchmark annotation and an optional numeric
+group hint. `--group` explicitly selects the owner if the URL omits it. Before
+any chart/menu/download action, the fixed universe metadata API must confirm its
+ID, creatorType and creatorTargetId. Contradictory/duplicate group hints and
+different universe/tab paths still stop. The shared ownership check also backs
+settings reads; URL parameters are not authorization or ownership evidence.
+
+In interactive mode the original Firefox session establishes the expected user
+but is no longer injected into the new private browser, and the seed navigation
+is omitted. Reservations are initial identity, analytics navigation, manually
+authenticated identity, universe-owner read, one CSV click: five total. The
+non-interactive mode instead uses identity, seed, analytics navigation, owner
+read, CSV click: also five. No quota increase, automatic login, retries or
+credential persistence is introduced.

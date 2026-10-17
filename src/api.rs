@@ -295,13 +295,13 @@ impl<T: Transport> Api<T> {
         Ok(groups.data)
     }
 
-    pub fn settings<C: Clock>(
+    pub fn verify_experience_owner<C: Clock>(
         &mut self,
         universe: u64,
         user: u64,
         group: Option<u64>,
         guard: &mut TrafficGuard<C>,
-    ) -> Result<serde_json::Value, AppError> {
+    ) -> Result<(), AppError> {
         let info: serde_json::Value = self.read(
             Url::parse(&format!(
                 "https://develop.roblox.com/v1/universes/{universe}"
@@ -317,9 +317,20 @@ impl<T: Transport> Api<T> {
             return Err(AppError::new(
                 "experience_owner_mismatch",
                 "The experience does not match the explicitly selected owner.",
-                "Select the correct --group and --universe. No settings query or owner fallback was attempted.",
+                "Select the correct group and experience. No settings query, chart action or owner fallback was attempted.",
             ));
         }
+        Ok(())
+    }
+
+    pub fn settings<C: Clock>(
+        &mut self,
+        universe: u64,
+        user: u64,
+        group: Option<u64>,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<serde_json::Value, AppError> {
+        self.verify_experience_owner(universe, user, group, guard)?;
         let raw: serde_json::Value = self.read(
             Url::parse(&format!(
                 "https://develop.roblox.com/v1/universes/{universe}/configuration"
@@ -584,6 +595,21 @@ mod tests {
                 }
             }
             assert_eq!(api.transport.requests.len(), 1);
+        }
+    }
+
+    #[test]
+    fn canonical_browser_url_still_requires_a_server_verified_group_owner() {
+        for owner in [42, 99] {
+            let root = tempfile::tempdir().unwrap();
+            let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+            let mut api = api(vec![response(
+                json!({ "id": 77, "creatorType": "Group", "creatorTargetId": owner }),
+            )]);
+            let result = api.verify_experience_owner(77, 1, Some(42), &mut guard);
+            assert_eq!(result.is_ok(), owner == 42);
+            assert_eq!(api.transport.requests.len(), 1);
+            assert_eq!(api.transport.requests[0].path(), "/v1/universes/77");
         }
     }
 

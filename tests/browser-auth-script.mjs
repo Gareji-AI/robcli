@@ -94,3 +94,8 @@ test('another group or duplicate group after manual login is refused', () => {
   assert.equal(probe({ expected, search: '?groupId=42&groupId=43' }).state, 'wrong_target');
   assert.deepEqual(probe({ expected, search: '?groupId=42' }), { state: 'waiting' });
 });
+
+test('canonical benchmark URL may omit the group hint while keeping the same universe', () => {
+  const expected = 'https://create.roblox.com/dashboard/creations/experiences/77/analytics/retention?groupId=42';
+  assert.deepEqual(probe({ expected, search: '?annotation=Benchmark' }), { state: 'waiting' });
+});

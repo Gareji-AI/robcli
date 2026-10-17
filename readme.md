@@ -81,11 +81,13 @@ rob analytics export \
 Replace synthetic IDs and use the exact visible chart title. Accepted tabs:
 retention, engagement, acquisition, demographics, economy, funnels, explore.
 Only `https://create.roblox.com` with this experience analytics path and an optional
-numeric `groupId` is allowed. Existing output files are never overwritten.
+numeric `groupId` and fixed `annotation=Benchmark` are allowed. For a canonical
+group-owned page without `groupId`, supply `--group <id>` explicitly. Conflicting
+group hints are rejected before credentials. Existing files are never overwritten.
 
 **Browser traffic exception:** normal page assets/XHR are outside the direct-API
 five-request cap. This is why a separate `--allow-browser-page-load` is mandatory.
-The flow allows one cookie-origin seed navigation, one analytics page navigation,
+The non-interactive flow allows one cookie-origin seed navigation, one analytics page navigation,
 one chart-menu click and one CSV click. No reload, repeated export click, polling
 of a metrics endpoint, or fallback API query. The browser's internal requests and
 retries are not controlled by the direct HTTP client. Do not run this in a loop.
@@ -137,16 +139,27 @@ visible private Firefox, not a stealth setting or challenge bypass:
    password/code in the terminal or agent chat. `cancel`/EOF/5 minutes ends the run.
 
 While waiting, no browser-control or authentication polling is performed. After
-confirmation, robcli checks the exact experience/tab/group, reads only the named
+confirmation, robcli checks the exact experience/tab, reads only the named
 session cookie from its **owned** private browser in memory, and verifies its
-account through the fixed whoami API. A different account/target stops before
+account through the fixed whoami API. It verifies the universe's selected
+User/Group owner through the published metadata API before any chart action.
+A different account/target/owner stops before
 CSV. No second automatic navigation, reload or export click is added. The extra
 identity read counts within the unchanged five-attempt budget (a complete
-interactive export uses five reservations). User-driven login/navigation has
+export uses five reservations in either mode). Interactive mode does not seed an
+origin or inject the original Firefox cookie: it opens only the analytics page,
+and the user authenticates there. This leaves room for server-side owner
+verification without raising the budget. User-driven login/navigation has
 normal browser traffic outside the direct API cap. Filters are those of the
 manually confirmed page and are not automatically extracted. The owned browser
 and its session are discarded at exit; existing Firefox is untouched. Real
 manual-login/CSV completion remains unverified until the user completes this flow.
+
+Version 0.2.2 fixes a canonical-URL false stop: Dashboard may remove `groupId` and
+add `annotation=Benchmark`. The universe/tab path must still match, and an
+explicit contradictory/duplicate group query is refused. Missing `groupId` is
+not an ownership proof or an error by itself; the independent server-side owner
+check is mandatory in both modes. Other universe paths remain blocked.
 
 ## Review a key plan before issuing anything
 

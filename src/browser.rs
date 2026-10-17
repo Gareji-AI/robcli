@@ -19,6 +19,8 @@ pub(crate) struct ExportOptions {
     pub chart: String,
     output: PathBuf,
     interactive_login: bool,
+    universe: u64,
+    group: Option<u64>,
 }
 
 fn browser_error(code: &'static str, message: &'static str) -> AppError {
@@ -60,9 +62,13 @@ impl ExportOptions {
             || url.password().is_some()
             || url.fragment().is_some()
             || !path_valid
-            || query.len() > 1
-            || query.iter().any(|(key, value)| {
-                key != "groupId" || !value.parse::<u64>().is_ok_and(|id| id > 0)
+            || query.len() > 2
+            || query.iter().filter(|(key, _)| key == "groupId").count() > 1
+            || query.iter().filter(|(key, _)| key == "annotation").count() > 1
+            || query.iter().any(|(key, value)| match key.as_ref() {
+                "groupId" => !value.parse::<u64>().is_ok_and(|id| id > 0),
+                "annotation" => value != "Benchmark",
+                _ => true,
             })
             || chart.is_empty()
             || chart.len() > 200
@@ -70,7 +76,7 @@ impl ExportOptions {
         {
             return Err(browser_error(
                 "analytics_url_invalid",
-                "Only an exact supported Creator Dashboard analytics URL and optional numeric groupId are accepted.",
+                "Only a supported Creator Dashboard analytics URL, optional numeric groupId and annotation=Benchmark are accepted.",
             ));
         }
         if !output
@@ -83,12 +89,32 @@ impl ExportOptions {
                 "Choose a new .csv output file; existing files are never overwritten.",
             ));
         }
+        let universe = parts[3].parse().unwrap();
+        let group = query
+            .iter()
+            .find(|(key, _)| key == "groupId")
+            .map(|(_, value)| value.parse().unwrap());
         Ok(Self {
             url,
             chart: chart.to_owned(),
             output: output.to_path_buf(),
             interactive_login: false,
+            universe,
+            group,
         })
+    }
+
+    pub fn with_group(mut self, group: Option<u64>) -> Result<Self, AppError> {
+        if group.is_some_and(|id| id == 0)
+            || (group.is_some() && self.group.is_some() && group != self.group)
+        {
+            return Err(browser_error(
+                "analytics_owner_conflict",
+                "The explicit group and URL group hint disagree. No credentials were read.",
+            ));
+        }
+        self.group = group.or(self.group);
+        Ok(self)
     }
 
     pub fn with_interactive_login(mut self, enabled: bool) -> Self {
@@ -275,7 +301,7 @@ impl Drop for CsvTarget {
 
 pub(crate) fn export<C: Clock>(
     options: &ExportOptions,
-    cookie: &SessionCookie,
+    cookie: SessionCookie,
     driver_path: &Path,
     expected_user: u64,
     guard: &mut TrafficGuard<C>,
@@ -288,19 +314,28 @@ pub(crate) fn export<C: Clock>(
         )
     })?;
     let mut ui = LocalDriver::launch(driver_path, downloads.path(), options)?;
-    guard.reserve()?;
-    ui.navigate("https://www.roblox.com/robots.txt")?;
-    ui.call(Method::POST, "cookie", Some(json!({ "cookie": { "name": ".ROBLOSECURITY", "value": cookie.browser_value(), "domain": ".roblox.com", "path": "/", "secure": true, "httpOnly": true, "sameSite": "Lax" } })))?;
+    if !options.interactive_login {
+        guard.reserve()?;
+        ui.navigate("https://www.roblox.com/robots.txt")?;
+        ui.call(Method::POST, "cookie", Some(json!({ "cookie": { "name": ".ROBLOSECURITY", "value": cookie.browser_value(), "domain": ".roblox.com", "path": "/", "secure": true, "httpOnly": true, "sameSite": "Lax" } })))?;
+    }
     guard.reserve()?;
     ui.navigate(options.url.as_str())?;
     if options.interactive_login {
         manual_login_gate(options, expected_user)?;
-        report(&mut ui, "target-probe", &options.chart, 0)?;
-        let browser_cookie = ui.owned_session_cookie()?;
-        let mut api =
-            crate::api::Api::new(crate::transport::HttpsTransport::new()?, browser_cookie);
+    }
+    report(&mut ui, "target-probe", &options.chart, 0)?;
+    let browser_cookie = if options.interactive_login {
+        ui.owned_session_cookie()?
+    } else {
+        cookie
+    };
+    let mut api = crate::api::Api::new(crate::transport::HttpsTransport::new()?, browser_cookie);
+    if options.interactive_login {
         api.confirm_account(expected_user, guard)?;
     }
+    api.verify_experience_owner(options.universe, expected_user, options.group, guard)?;
+    drop(api);
     let bytes = export_chart(&mut ui, &options.chart, guard)?;
     target
         .file
@@ -316,6 +351,7 @@ pub(crate) fn export<C: Clock>(
     target.complete = true;
     Ok(
         json!({ "chart": options.chart, "sourceUrl": options.url.as_str(), "output": options.output.to_string_lossy(), "bytes": bytes.len(),
+        "universeId": options.universe, "groupId": options.group, "ownerVerified": true,
         "interactiveLogin": options.interactive_login, "accountReverified": options.interactive_login,
         "filters": if options.interactive_login { "Filters of the manually confirmed page; not extracted automatically." } else { "Fresh Dashboard page defaults; old browser local-storage filters are not copied." },
         "browserTraffic": "One analytics page load and one export click; normal page assets/XHR are not covered by the direct-API request cap." }),
@@ -355,6 +391,7 @@ struct LocalDriver {
     session: String,
     downloads: PathBuf,
     expected_url: String,
+    expected_group: Option<String>,
 }
 
 impl LocalDriver {
@@ -464,6 +501,7 @@ impl LocalDriver {
             session,
             downloads: downloads.to_path_buf(),
             expected_url: options.url.to_string(),
+            expected_group: options.group.map(|id| id.to_string()),
         };
         driver.call(
             Method::POST,
@@ -561,7 +599,7 @@ impl ChartUi for LocalDriver {
         self.call(
             Method::POST,
             "execute/sync",
-            Some(json!({ "script": CHART_SCRIPT, "args": [chart, phase, self.expected_url] })),
+            Some(json!({ "script": CHART_SCRIPT, "args": [chart, phase, self.expected_url, self.expected_group] })),
         )
     }
 
@@ -793,7 +831,7 @@ mod winjob {
 // This uses the visible menu reported by the user's screenshot, not an invented
 // analytics-query payload. Missing/ambiguous UI is a stop, not a selector sweep.
 const CHART_SCRIPT: &str = r#"
-const [chart, phase, expected] = arguments;
+const [chart, phase, expected, expectedGroup] = arguments;
 const norm = s => (s || '').replace(/\s+/g, ' ').trim();
 const visible = e => !!e && e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0 && getComputedStyle(e).visibility !== 'hidden';
 const originCategory = location.origin === 'https://create.roblox.com' ? 'creator_dashboard' : location.origin === 'https://www.roblox.com' ? 'roblox_web' : location.origin === 'https://auth.roblox.com' ? 'roblox_auth' : 'other';
@@ -809,7 +847,10 @@ if ([...document.querySelectorAll('[role="dialog"]')].some(e => visible(e) && /t
 if (expected) {
   const target = new URL(expected);
   const groups = new URLSearchParams(location.search).getAll('groupId');
-  if (location.pathname !== target.pathname || groups.length > 1 || (groups[0] || null) !== target.searchParams.get('groupId')) return {state:'wrong_target'};
+  const selectedGroup = expectedGroup === undefined ? target.searchParams.get('groupId') : expectedGroup;
+  // groupId is a removable Dashboard context hint, not the ownership proof.
+  // Before any chart action Rust verifies the selected universe's owner via API.
+  if (location.pathname !== target.pathname || groups.length > 1 || (groups.length === 1 && groups[0] !== selectedGroup)) return {state:'wrong_target'};
 }
 if (phase === 'target-probe') return {state:'ready'};
 if (phase === 'menu-probe' || phase === 'download') {
@@ -943,6 +984,42 @@ mod tests {
         assert_eq!(options["prefs"]["browser.privatebrowsing.autostart"], true);
         assert!(options.get("profile").is_none());
         assert!(!options.to_string().contains("--profile"));
+    }
+
+    #[test]
+    fn canonical_benchmark_url_accepts_explicit_owner_but_not_conflicting_or_arbitrary_queries() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = "https://create.roblox.com/dashboard/creations/experiences/77/analytics/retention?annotation=Benchmark";
+        let selected =
+            ExportOptions::validate(canonical, "Day 1 retention", &root.path().join("out.csv"))
+                .unwrap()
+                .with_group(Some(42))
+                .unwrap();
+        assert_eq!(selected.group, Some(42));
+        assert_eq!(selected.universe, 77);
+        let with_hint = "https://create.roblox.com/dashboard/creations/experiences/77/analytics/retention?groupId=42";
+        assert!(
+            ExportOptions::validate(with_hint, "Day 1 retention", &root.path().join("other.csv"))
+                .unwrap()
+                .with_group(Some(43))
+                .is_err()
+        );
+        assert!(
+            ExportOptions::validate(
+                &canonical.replace("Benchmark", "private-value"),
+                "Day 1 retention",
+                &root.path().join("out.csv")
+            )
+            .is_err()
+        );
+        assert!(
+            ExportOptions::validate(
+                &format!("{canonical}&annotation=Benchmark"),
+                "Day 1 retention",
+                &root.path().join("out.csv")
+            )
+            .is_err()
+        );
     }
 
     struct Scripted {
