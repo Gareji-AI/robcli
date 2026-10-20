@@ -30,11 +30,20 @@ fallback, CSRF exchange or alternate-endpoint probe was used to overcome it.
 
 ## Known Dashboard blocker
 
-The latest manually authenticated CSV attempt stopped at
+A manually authenticated CSV attempt stopped at
 `read_session_cookie / driver HTTP 404 / no such cookie`, before same-account
-and owner re-verification. Cookie scope/partition behavior is unresolved.
+and owner re-verification. That named WebDriver path is a hypothesis for the
+404: the cookie name starts with a dot, and the named lookup can miss it.
 This is not proof of a CAPTCHA or 2FA challenge, and no CSV success is claimed.
-Public discovery additions do not fix this unrelated issue.
+
+The interactive lookup now switches to the content context, requires the current
+document URL to equal the approved analytics HTTPS URL, then uses W3C Get All
+Cookies. It accepts exactly one `.ROBLOSECURITY` cookie whose domain is
+`.roblox.com` or `roblox.com`. Same-account confirmation and experience-owner
+verification still run before any CSV click. A missing context stops as
+`session_cookie_context_unverified`. A missing or duplicate cookie stops as
+`manual_login_session_missing`. The change is covered by offline WebDriver
+tests only. Live CSV export is still not claimed.
 
 ## Publication verification
 

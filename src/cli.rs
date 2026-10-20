@@ -97,8 +97,38 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: AnalyticsCommand,
     },
+    /// Compare two saved success envelopes offline. No network and no credential lookup.
+    Compare {
+        #[arg(long)]
+        before: PathBuf,
+        #[arg(long)]
+        after: PathBuf,
+    },
+    /// Render one saved success envelope to a new Markdown or CSV file.
+    Report {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_enum)]
+        format: ReportFormat,
+    },
+    /// Report whether Firefox and geckodriver exist. Paths and secrets are not returned.
+    Doctor,
+    /// Describe one command's request budget without executing it.
+    Plan {
+        /// Inner command arguments. Prefer `rob plan -- <command>`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Discover the supported commands and safety limits without reading cookies.
     Schema,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub(crate) enum ReportFormat {
+    Markdown,
+    Csv,
 }
 
 impl Command {
@@ -155,12 +185,24 @@ impl Command {
             Self::Games {
                 command: GameCommand::Products { .. },
             } => "games products",
+            Self::Games {
+                command: GameCommand::Icon { .. },
+            } => "games icon",
+            Self::Games {
+                command: GameCommand::Thumbnails { .. },
+            } => "games thumbnails",
+            Self::Games {
+                command: GameCommand::Badges { .. },
+            } => "games badges",
             Self::Avatar {
                 command: AvatarCommand::Search(_),
             } => "avatar search",
             Self::Avatar {
                 command: AvatarCommand::Link(_),
             } => "avatar link",
+            Self::Avatar {
+                command: AvatarCommand::Bundle { .. },
+            } => "avatar bundle",
             Self::Store {
                 command: StoreCommand::Search(_),
             } => "store search",
@@ -187,6 +229,10 @@ impl Command {
                 command: ApiKeyCommand::Create { .. },
             } => "apikey create",
             Self::Analytics { .. } => "analytics export",
+            Self::Compare { .. } => "compare",
+            Self::Report { .. } => "report",
+            Self::Doctor => "doctor",
+            Self::Plan { .. } => "plan",
             Self::Schema => "schema",
         }
     }
@@ -285,6 +331,37 @@ pub(crate) enum GameCommand {
         #[command(flatten)]
         page: crate::discovery::Page,
     },
+    /// One anonymous game-icon metadata read. Image bytes are not downloaded.
+    Icon {
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
+        universe: u64,
+        #[arg(long, default_value = "150x150")]
+        size: String,
+        #[arg(long, default_value = "Png")]
+        format: String,
+    },
+    /// One anonymous thumbnail-list read. Image bytes are not downloaded.
+    Thumbnails {
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
+        universe: u64,
+        #[arg(long, default_value = "768x432")]
+        size: String,
+        #[arg(long, default_value = "Png")]
+        format: String,
+        #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..=10))]
+        count: u32,
+    },
+    /// One page of public badges for one Universe. No award or icon download.
+    Badges {
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
+        universe: u64,
+        #[arg(long, default_value = "10", value_parser = ["10", "25", "50", "100"])]
+        limit: String,
+        #[arg(long, default_value = "Asc", value_parser = ["Asc", "Desc"])]
+        sort: String,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -293,6 +370,11 @@ pub(crate) enum AvatarCommand {
     Search(Box<crate::avatar::Search>),
     /// Offline catalog/try-on-page links, with an explicit ID namespace.
     Link(crate::avatar::Target),
+    /// One public bundle-details read. Item IDs stay in their reported namespace.
+    Bundle {
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
+        bundle: u64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -322,7 +404,7 @@ pub(crate) enum AnalyticsCommand {
         #[arg(long)]
         output: PathBuf,
         /// Explicit group owner, independently verified even when Dashboard omits groupId.
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
         group: Option<u64>,
         /// Path to Mozilla geckodriver. Otherwise use the OS-local robcli tools directory or PATH.
         #[arg(long)]
@@ -346,7 +428,7 @@ pub(crate) enum ApiKeyCommand {
         secret_name: String,
         #[arg(long)]
         apply: bool,
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
         confirm_user: Option<u64>,
         /// Explicitly permit one CSRF token-validation replay only.
         #[arg(long)]
@@ -354,7 +436,7 @@ pub(crate) enum ApiKeyCommand {
     },
     /// List key metadata only. The Dashboard uses a read-only POST for this.
     List {
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
         group: Option<u64>,
         #[arg(long)]
         all: bool,
@@ -372,7 +454,13 @@ pub(crate) enum AuthCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum GroupCommand {
-    /// List groups and the account's roles; membership is not an admin grant.
+    /// List the signed-in account's groups and roles.
+    ///
+    /// The request always sends `includeLocked=false`,
+    /// `includeNotificationPreferences=false`, and `discoveryType=0`.
+    /// Locked communities are not requested. Notification preferences are not
+    /// requested or projected. `discoveryType` 0 is the published default
+    /// discovery set, not every community type and not an admin grant.
     List,
 }
 
@@ -380,15 +468,15 @@ pub(crate) enum GroupCommand {
 pub(crate) enum ExperienceCommand {
     /// Read settings only after the selected owner matches the experience.
     Settings {
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
         universe: u64,
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
         group: Option<u64>,
     },
     /// List non-archived user-owned experiences unless --archived is selected.
     List {
         /// Select a group explicitly instead of the personal collection.
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
         group: Option<u64>,
         /// Follow pagination, stopping at the shared development traffic budget.
         #[arg(long)]
@@ -407,9 +495,9 @@ pub(crate) enum ExperienceCommand {
 #[derive(Debug, Subcommand)]
 pub(crate) enum DashboardCommand {
     Links {
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
         universe: u64,
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=9223372036854775807))]
         group: Option<u64>,
     },
 }

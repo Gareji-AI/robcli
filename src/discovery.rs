@@ -202,6 +202,193 @@ fn array<'a>(v: &'a Value, key: &str) -> Result<&'a Vec<Value>, AppError> {
         .filter(|a| a.len() <= 500)
         .ok_or_else(bad_reply)
 }
+fn forbidden_control(c: char) -> bool {
+    c.is_control() && c != '\n' && c != '\r' && c != '\t'
+}
+fn opt_bool(v: &Value, key: &str) -> Result<Option<bool>, AppError> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        _ => Err(bad_reply()),
+    }
+}
+fn opt_u64(v: &Value, key: &str) -> Result<Option<u64>, AppError> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or_else(bad_reply),
+    }
+}
+fn opt_f64(v: &Value, key: &str) -> Result<Option<f64>, AppError> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_f64().map(Some).ok_or_else(bad_reply),
+    }
+}
+fn opt_id(v: &Value, key: &str) -> Result<Option<u64>, AppError> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .filter(|id| valid_id(*id))
+            .map(Some)
+            .ok_or_else(bad_reply),
+    }
+}
+const ICON_SIZES: &[&str] = &["50x50", "128x128", "150x150", "256x256", "512x512"];
+const THUMB_SIZES: &[&str] = &["768x432", "576x324", "480x270", "384x216", "256x144"];
+
+pub(crate) fn icon_url(universe: u64, size: &str, format: &str) -> Result<Url, AppError> {
+    media_url(
+        "https://thumbnails.roblox.com/v1/games/icons",
+        universe,
+        size,
+        format,
+        ICON_SIZES,
+        None,
+    )
+}
+pub(crate) fn thumbnail_url(
+    universe: u64,
+    size: &str,
+    format: &str,
+    count: u32,
+) -> Result<Url, AppError> {
+    if !(1..=10).contains(&count) {
+        return Err(invalid());
+    }
+    media_url(
+        "https://thumbnails.roblox.com/v1/games/multiget/thumbnails",
+        universe,
+        size,
+        format,
+        THUMB_SIZES,
+        Some(count),
+    )
+}
+fn media_url(
+    base: &str,
+    universe: u64,
+    size: &str,
+    format: &str,
+    sizes: &[&str],
+    count: Option<u32>,
+) -> Result<Url, AppError> {
+    if !valid_id(universe) || !sizes.contains(&size) || !matches!(format, "Png" | "Jpeg") {
+        return Err(invalid());
+    }
+    let mut url = Url::parse(base).unwrap();
+    {
+        let mut query = url.query_pairs_mut();
+        query
+            .append_pair("universeIds", &universe.to_string())
+            .append_pair("size", size)
+            .append_pair("format", format)
+            .append_pair("isCircular", "false");
+        if let Some(count) = count {
+            query.append_pair("count", &count.to_string());
+        }
+    }
+    Ok(url)
+}
+pub(crate) fn badges_url(
+    universe: u64,
+    limit: &str,
+    sort: &str,
+    cursor: Option<&str>,
+) -> Result<Url, AppError> {
+    if !valid_id(universe)
+        || !matches!(limit, "10" | "25" | "50" | "100")
+        || !matches!(sort, "Asc" | "Desc")
+        || cursor.is_some_and(|value| !text_ok(value, 4096))
+    {
+        return Err(invalid());
+    }
+    let mut url = Url::parse(&format!(
+        "https://badges.roblox.com/v1/universes/{universe}/badges"
+    ))
+    .unwrap();
+    {
+        let mut query = url.query_pairs_mut();
+        query
+            .append_pair("limit", limit)
+            .append_pair("sortOrder", sort);
+        if let Some(cursor) = cursor {
+            query.append_pair("cursor", cursor);
+        }
+    }
+    Ok(url)
+}
+fn one_thumbnail(value: &Value, universe: u64) -> Result<&Value, AppError> {
+    let rows = array(value, "data")?;
+    if rows.len() != 1 || rows[0].get("targetId").and_then(Value::as_u64) != Some(universe) {
+        return Err(bad_reply());
+    }
+    Ok(&rows[0])
+}
+fn media_state(row: &Value) -> Result<(String, bool, Option<String>), AppError> {
+    let state = opt_string(row, "state")?
+        .filter(|value| text_ok(value, 64))
+        .ok_or_else(bad_reply)?;
+    let ready = match state.as_str() {
+        "Completed" => true,
+        "Pending" | "Blocked" | "Error" | "InReview" | "TemporarilyUnavailable" => false,
+        _ => return Err(bad_reply()),
+    };
+    let image = if ready {
+        Some(public_image_url(row)?.ok_or_else(bad_reply)?)
+    } else {
+        None
+    };
+    Ok((state, ready, image))
+}
+fn thumbnail_card(universe: u64, size: &str, format: &str, row: &Value) -> Result<Value, AppError> {
+    if row.get("targetId").and_then(Value::as_u64) != Some(universe) {
+        return Err(bad_reply());
+    }
+    let (state, ready, image) = media_state(row)?;
+    Ok(json!({
+        "targetId": universe, "state": state, "imageReady": ready, "imageUrl": image,
+        "size": size, "format": format, "imageBytesFetched": false, "rightsVerified": false, "ctrEstimated": false
+    }))
+}
+fn thumbnail_image_card(
+    universe: u64,
+    size: &str,
+    format: &str,
+    row: &Value,
+) -> Result<Value, AppError> {
+    let thumbnail_id = row
+        .get("targetId")
+        .and_then(Value::as_u64)
+        .filter(|id| valid_id(*id))
+        .ok_or_else(bad_reply)?;
+    let (state, ready, image) = media_state(row)?;
+    Ok(json!({
+        "universeId": universe, "thumbnailId": thumbnail_id, "state": state,
+        "imageReady": ready, "imageUrl": image, "size": size, "format": format,
+        "imageBytesFetched": false, "rightsVerified": false, "ctrEstimated": false
+    }))
+}
+fn public_image_url(row: &Value) -> Result<Option<String>, AppError> {
+    match row.get("imageUrl") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(raw)) => {
+            let url = Url::parse(raw).map_err(|_| bad_reply())?;
+            let host = url.host_str().unwrap_or("");
+            if url.scheme() != "https"
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.port().is_some()
+                || url.fragment().is_some()
+                || !(host == "rbxcdn.com" || host.ends_with(".rbxcdn.com"))
+            {
+                return Err(bad_reply());
+            }
+            Ok(Some(url.to_string()))
+        }
+        _ => Err(bad_reply()),
+    }
+}
 fn positive(v: &Value, key: &str) -> Result<u64, AppError> {
     v.get(key)
         .and_then(Value::as_u64)
@@ -337,7 +524,13 @@ impl<T: Transport> Discovery<T> {
         Self { transport }
     }
     fn read<C: Clock>(&mut self, url: Url, guard: &mut TrafficGuard<C>) -> Result<Value, AppError> {
-        let request = Request::discovery(url)?;
+        self.send(Request::discovery(url)?, guard)
+    }
+    fn send<C: Clock>(
+        &mut self,
+        request: Request,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<Value, AppError> {
         guard.reserve()?;
         let r = self.transport.send(request)?;
         if r.challenge || !(200..300).contains(&r.status) {
@@ -353,14 +546,13 @@ impl<T: Transport> Discovery<T> {
                     _ => "discovery_request_failed",
                 }
             };
-            let mut e = AppError::new(
+            return Err(AppError::http(
                 code,
                 "The anonymous public read was refused; no retry or credential fallback was attempted.",
                 "Stop. Do not switch accounts, attach Cookie/API-key/CSRF, or try alternate endpoints to bypass this refusal.",
-            );
-            e.http_status = Some(r.status);
-            e.retry_after_seconds = r.retry_after_seconds;
-            return Err(e);
+                r.status,
+                r.retry_after_seconds,
+            ));
         }
         serde_json::from_slice(&r.body).map_err(|_| bad_reply())
     }
@@ -502,6 +694,7 @@ impl<T: Transport> Discovery<T> {
         let cursor = next(&v, "nextPageToken")?;
         Ok(
             json!({"sortId":sort,"name":opt_string(&v,"sortDisplayName")?,"country":chart.country,"device":chart.device.api(),
+            "requestedPageToken":chart.page_token,"requestedLimit":limit,
             "items":cards,"returnedByApi":rows.len(),"truncatedLocally":rows.len()>limit as usize,"omittedFromPage":rows.len().saturating_sub(limit as usize),"nextPageToken":cursor,"hasMorePages":cursor.is_some(),
             "automaticPagination":false,"detailFanout":false,"globalRankVerified":false,"snapshotOnly":true}),
         )
@@ -620,9 +813,158 @@ impl<T: Transport> Discovery<T> {
         let cursor = next(&v, "nextPageToken")?.or(next(&v, "nextPageCursor")?);
         Ok(
             json!({"universeId":id,"requestedPlaceId":target.place,"items":cards,"nextPageToken":cursor,"hasMore":cursor.is_some(),
+            "requestedPageToken":page.page_token,"requestedLimit":page.limit,
             "automaticPagination":false,"detailFanout":false,"pricesAreAnonymousSnapshot":true,"personalizedCheckoutPriceVerified":false,
             "salesRevenueAvailable":false,"purchasePerformed":false}),
         )
+    }
+
+    pub fn icon<C: Clock>(
+        &mut self,
+        universe: u64,
+        size: &str,
+        format: &str,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<Value, AppError> {
+        let value = self.send(
+            Request::game_thumbnail(icon_url(universe, size, format)?)?,
+            guard,
+        )?;
+        let row = one_thumbnail(&value, universe)?;
+        thumbnail_card(universe, size, format, row)
+    }
+
+    pub fn thumbnails<C: Clock>(
+        &mut self,
+        universe: u64,
+        size: &str,
+        format: &str,
+        count: u32,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<Value, AppError> {
+        let value = self.send(
+            Request::game_thumbnail(thumbnail_url(universe, size, format, count)?)?,
+            guard,
+        )?;
+        let rows = array(&value, "data")?;
+        if rows.len() != 1 || rows[0].get("universeId").and_then(Value::as_u64) != Some(universe) {
+            return Err(bad_reply());
+        }
+        let images = rows[0]
+            .get("thumbnails")
+            .and_then(Value::as_array)
+            .ok_or_else(bad_reply)?;
+        if images.len() > count as usize {
+            return Err(bad_reply());
+        }
+        let mut cards = Vec::new();
+        let mut seen = HashSet::new();
+        for row in images {
+            let card = thumbnail_image_card(universe, size, format, row)?;
+            let thumbnail_id = card["thumbnailId"].as_u64().ok_or_else(bad_reply)?;
+            if !seen.insert(thumbnail_id) {
+                return Err(bad_reply());
+            }
+            cards.push(card);
+        }
+        Ok(json!({
+            "universeId": universe,
+            "size": size,
+            "format": format,
+            "requestedCount": count,
+            "images": cards,
+            "imageBytesFetched": false,
+            "automaticPagination": false,
+            "detailFanout": false,
+            "rightsVerified": false,
+            "ctrEstimated": false
+        }))
+    }
+
+    pub fn badges<C: Clock>(
+        &mut self,
+        universe: u64,
+        limit: &str,
+        sort: &str,
+        cursor: Option<&str>,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<Value, AppError> {
+        let value = self.send(
+            Request::badges(badges_url(universe, limit, sort, cursor)?)?,
+            guard,
+        )?;
+        let rows = array(&value, "data")?;
+        if rows.len() > limit.parse::<usize>().unwrap_or(0) {
+            return Err(bad_reply());
+        }
+        let mut cards = Vec::new();
+        let mut seen = HashSet::new();
+        for row in rows {
+            let id = positive(row, "id")?;
+            if !seen.insert(id) {
+                return Err(bad_reply());
+            }
+            let name = opt_string(row, "name")?
+                .filter(|s| text_ok(s, 4096))
+                .ok_or_else(bad_reply)?;
+            let description = match row.get("description") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(text))
+                    if text.len() <= 4096 && !text.chars().any(forbidden_control) =>
+                {
+                    Some(text.clone())
+                }
+                _ => return Err(bad_reply()),
+            };
+            let awarding = row.get("awardingUniverse").filter(|value| !value.is_null());
+            if let Some(awarding) = awarding
+                && awarding.get("id").and_then(Value::as_u64) != Some(universe)
+            {
+                return Err(bad_reply());
+            }
+            let (past_day, awarded, win_rate) =
+                if let Some(stats) = row.get("statistics").filter(|value| !value.is_null()) {
+                    (
+                        opt_u64(stats, "pastDayAwardedCount")?,
+                        opt_u64(stats, "awardedCount")?,
+                        opt_f64(stats, "winRatePercentage")?,
+                    )
+                } else {
+                    (None, None, None)
+                };
+            cards.push(json!({
+                "badgeId": id,
+                "name": name,
+                "description": description,
+                "enabled": opt_bool(row, "enabled")?,
+                "iconImageId": opt_id(row, "iconImageId")?,
+                "displayIconImageId": opt_id(row, "displayIconImageId")?,
+                "awardingUniverseId": awarding.and_then(|value| value.get("id")).and_then(Value::as_u64),
+                "awardingRootPlaceId": awarding.map(|value| opt_id(value, "rootPlaceId")).transpose()?.flatten(),
+                "statistics": {
+                    "pastDayAwardedCount": past_day,
+                    "awardedCount": awarded,
+                    "winRatePercentage": win_rate,
+                    "winRateIsNotCompletionOrChurn": true
+                },
+                "untrustedText": true
+            }));
+        }
+        let next_cursor = next(&value, "nextPageCursor")?;
+        Ok(json!({
+            "universeId": universe,
+            "limit": limit.parse::<u32>().unwrap_or(0),
+            "sortOrder": sort,
+            "requestedCursor": cursor,
+            "items": cards,
+            "nextPageCursor": next_cursor,
+            "hasMore": next_cursor.is_some(),
+            "emptyPageIsNotProofOfNoBadges": true,
+            "automaticPagination": false,
+            "detailFanout": false,
+            "ownershipVerified": false,
+            "awardPerformed": false
+        }))
     }
 }
 
@@ -890,6 +1232,7 @@ mod tests {
             c.transport.status = status;
             c.transport.challenge = status == 200;
             let e = c.top_music(&page(), &mut g).unwrap_err();
+            assert_eq!(e.exit_code, 3);
             assert!(!serde_json::to_string(&e).unwrap().contains("must-not-echo"));
             assert_eq!(c.transport.records.len(), 1);
             assert_eq!(c.transport.records[0]["cookieAttached"], false);
@@ -1003,5 +1346,95 @@ mod tests {
         assert_eq!(v["sorts"].as_array().unwrap().len(), 30);
         assert_eq!(v["truncatedLocally"], true);
         assert_eq!(c.transport.records.len(), 1);
+    }
+
+    #[test]
+    fn icons_thumbnails_and_badges_are_one_anonymous_get() {
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut client = fake(vec![json!({
+            "data": [{ "targetId": 77, "state": "Pending", "imageUrl": "https://tr.rbxcdn.com/hidden" }]
+        })]);
+        let pending = client.icon(77, "150x150", "Png", &mut guard).unwrap();
+        assert_eq!(pending["imageReady"], false);
+        assert_eq!(pending["imageUrl"], Value::Null);
+        assert_eq!(pending["imageBytesFetched"], false);
+        assert_eq!(client.transport.records[0]["cookieAttached"], false);
+        assert!(
+            client.transport.records[0]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("https://thumbnails.roblox.com/v1/games/icons?")
+        );
+
+        let mut client = fake(vec![json!({
+            "data": [{ "targetId": 77, "state": "Completed", "imageUrl": "https://tr.rbxcdn.com/icon.png" }]
+        })]);
+        let ready = client.icon(77, "150x150", "Png", &mut guard).unwrap();
+        assert_eq!(ready["imageUrl"], "https://tr.rbxcdn.com/icon.png");
+
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut client = fake(vec![json!({
+            "data": [{
+                "universeId": 77,
+                "thumbnails": [{
+                    "targetId": 1_538_429_222u64,
+                    "state": "Completed",
+                    "imageUrl": "https://tr.rbxcdn.com/thumb.png"
+                }]
+            }]
+        })]);
+        let images = client
+            .thumbnails(77, "768x432", "Png", 1, &mut guard)
+            .unwrap();
+        assert_eq!(images["universeId"], 77);
+        assert_eq!(images["images"][0]["thumbnailId"], 1_538_429_222u64);
+        assert_eq!(
+            images["images"][0]["imageUrl"],
+            "https://tr.rbxcdn.com/thumb.png"
+        );
+        assert!(images["images"][0].get("targetId").is_none());
+        assert_eq!(client.transport.records[0]["cookieAttached"], false);
+        let mut client = fake(vec![json!({
+            "data": [{
+                "universeId": 99,
+                "thumbnails": [{
+                    "targetId": 77,
+                    "state": "Completed",
+                    "imageUrl": "https://tr.rbxcdn.com/other.png"
+                }]
+            }]
+        })]);
+        assert_eq!(
+            client
+                .thumbnails(77, "768x432", "Png", 1, &mut guard)
+                .unwrap_err()
+                .code,
+            "discovery_response_invalid"
+        );
+
+        let mut client = fake(vec![json!({
+            "data": [{ "id": 5, "name": "Other", "awardingUniverse": { "id": 99 } }]
+        })]);
+        assert_eq!(
+            client
+                .badges(77, "10", "Asc", None, &mut guard)
+                .unwrap_err()
+                .code,
+            "discovery_response_invalid"
+        );
+
+        let mut client = fake(vec![json!({ "data": [], "nextPageCursor": null })]);
+        let page = client.badges(77, "10", "Asc", None, &mut guard).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 0);
+        assert_eq!(page["emptyPageIsNotProofOfNoBadges"], true);
+        assert_eq!(client.transport.records[0]["cookieAttached"], false);
+        assert!(
+            client.transport.records[0]["url"]
+                .as_str()
+                .unwrap()
+                .contains("badges.roblox.com/v1/universes/77/badges")
+        );
     }
 }

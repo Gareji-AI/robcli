@@ -18,6 +18,38 @@ pub(crate) struct Request {
     csrf: Option<HeaderValue>,
 }
 
+fn groups_roles_request(url: &Url) -> bool {
+    let Some(id) = url
+        .path()
+        .strip_prefix("/v2/users/")
+        .and_then(|path| path.strip_suffix("/groups/roles"))
+        .and_then(|id| id.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    if id == 0 || id > i64::MAX as u64 {
+        return false;
+    }
+    let pairs: Vec<_> = url.query_pairs().collect();
+    if pairs.len() != 3 {
+        return false;
+    }
+    let mut seen = [false; 3];
+    for (key, value) in &pairs {
+        let index = match key.as_ref() {
+            "includeLocked" if value == "false" => 0,
+            "includeNotificationPreferences" if value == "false" => 1,
+            "discoveryType" if value == "0" => 2,
+            _ => return false,
+        };
+        if seen[index] {
+            return false;
+        }
+        seen[index] = true;
+    }
+    seen == [true, true, true]
+}
+
 impl Request {
     pub fn new(url: Url, cookie: HeaderValue) -> Result<Self, AppError> {
         Self::validate(&url)?;
@@ -30,7 +62,7 @@ impl Request {
         };
         let allowed = match url.host_str() {
             Some("users.roblox.com") => path == "/v1/users/authenticated" && url.query().is_none(),
-            Some("groups.roblox.com") => numeric("/v2/users/", "/groups/roles"),
+            Some("groups.roblox.com") => groups_roles_request(&url),
             Some("develop.roblox.com") => {
                 path == "/v1/user/universes"
                     || numeric("/v1/groups/", "/universes")
@@ -139,6 +171,137 @@ impl Request {
             || url
                 .query_pairs()
                 .any(|(key, _)| !KEYS.contains(&key.as_ref()))
+        {
+            return Err(blocked());
+        }
+        Ok(Self {
+            url,
+            cookie: None,
+            method: Method::GET,
+            body: None,
+            csrf: None,
+        })
+    }
+
+    /// One anonymous bundle-details GET. Not the removed catalog metadata POST.
+    pub fn avatar_bundle(url: Url) -> Result<Self, AppError> {
+        Self::validate(&url)?;
+        let id = url
+            .path()
+            .strip_prefix("/v1/bundles/")
+            .and_then(|path| path.strip_suffix("/details"))
+            .and_then(|id| id.parse::<u64>().ok());
+        if url.host_str() != Some("catalog.roblox.com")
+            || url.query().is_some()
+            || !id.is_some_and(|id| id > 0 && id <= i64::MAX as u64)
+        {
+            return Err(blocked());
+        }
+        Ok(Self {
+            url,
+            cookie: None,
+            method: Method::GET,
+            body: None,
+            csrf: None,
+        })
+    }
+
+    /// Anonymous game icon or thumbnail metadata. Image bytes are not requested.
+    pub fn game_thumbnail(url: Url) -> Result<Self, AppError> {
+        Self::validate(&url)?;
+        let icon = url.path() == "/v1/games/icons";
+        let thumbs = url.path() == "/v1/games/multiget/thumbnails";
+        let keys: &[&str] = if icon {
+            &["universeIds", "size", "format", "isCircular"]
+        } else if thumbs {
+            &["universeIds", "count", "size", "format", "isCircular"]
+        } else {
+            return Err(blocked());
+        };
+        if url.host_str() != Some("thumbnails.roblox.com") || !fixed_query(&url, keys) {
+            return Err(blocked());
+        }
+        let pairs: Vec<_> = url.query_pairs().collect();
+        let size = pairs
+            .iter()
+            .find(|(key, _)| key == "size")
+            .map(|(_, value)| value.as_ref());
+        let format = pairs
+            .iter()
+            .find(|(key, _)| key == "format")
+            .map(|(_, value)| value.as_ref());
+        let circular = pairs
+            .iter()
+            .find(|(key, _)| key == "isCircular")
+            .map(|(_, value)| value.as_ref());
+        let universe = pairs
+            .iter()
+            .find(|(key, _)| key == "universeIds")
+            .and_then(|(_, value)| value.parse::<u64>().ok());
+        let sizes: &[&str] = if icon {
+            &["50x50", "128x128", "150x150", "256x256", "512x512"]
+        } else {
+            &["768x432", "576x324", "480x270", "384x216", "256x144"]
+        };
+        let count_ok = if thumbs {
+            pairs
+                .iter()
+                .find(|(key, _)| key == "count")
+                .and_then(|(_, value)| value.parse::<u32>().ok())
+                .is_some_and(|count| (1..=10).contains(&count))
+        } else {
+            true
+        };
+        if circular != Some("false")
+            || !matches!(format, Some("Png" | "Jpeg"))
+            || !size.is_some_and(|value| sizes.contains(&value))
+            || !universe.is_some_and(|id| id > 0 && id <= i64::MAX as u64)
+            || pairs.iter().filter(|(key, _)| key == "universeIds").count() != 1
+            || !count_ok
+        {
+            return Err(blocked());
+        }
+        Ok(Self {
+            url,
+            cookie: None,
+            method: Method::GET,
+            body: None,
+            csrf: None,
+        })
+    }
+
+    /// One anonymous public badge page. No award, inventory or badge-creation route.
+    pub fn badges(url: Url) -> Result<Self, AppError> {
+        Self::validate(&url)?;
+        let id = url
+            .path()
+            .strip_prefix("/v1/universes/")
+            .and_then(|path| path.strip_suffix("/badges"))
+            .and_then(|id| id.parse::<u64>().ok());
+        if url.host_str() != Some("badges.roblox.com")
+            || !id.is_some_and(|id| id > 0 && id <= i64::MAX as u64)
+            || !fixed_query(&url, &["limit", "sortOrder", "cursor"])
+        {
+            return Err(blocked());
+        }
+        let pairs: Vec<_> = url.query_pairs().collect();
+        let limit = pairs
+            .iter()
+            .find(|(key, _)| key == "limit")
+            .map(|(_, value)| value.as_ref());
+        let sort = pairs
+            .iter()
+            .find(|(key, _)| key == "sortOrder")
+            .map(|(_, value)| value.as_ref());
+        let cursor_ok = match pairs.iter().find(|(key, _)| key == "cursor") {
+            None => true,
+            Some((_, value)) => {
+                !value.is_empty() && value.len() <= 4096 && !value.chars().any(|c| c.is_control())
+            }
+        };
+        if !matches!(limit, Some("10" | "25" | "50" | "100"))
+            || !matches!(sort, Some("Asc" | "Desc"))
+            || !cursor_ok
         {
             return Err(blocked());
         }
@@ -278,6 +441,8 @@ impl Request {
                         | "apis.roblox.com"
                         | "catalog.roblox.com"
                         | "games.roblox.com"
+                        | "thumbnails.roblox.com"
+                        | "badges.roblox.com"
                 )
             )
         {
@@ -301,6 +466,25 @@ impl Request {
             "csrfAttached": self.csrf.is_some(), "cookieAttached": self.cookie.is_some(),
             "cookieSensitive": self.cookie.as_ref().is_some_and(HeaderValue::is_sensitive) })
     }
+}
+
+fn fixed_query(url: &Url, keys: &[&str]) -> bool {
+    let pairs: Vec<_> = url.query_pairs().collect();
+    if pairs.is_empty() || pairs.iter().any(|(key, _)| !keys.contains(&key.as_ref())) {
+        return false;
+    }
+    let required = if keys.contains(&"cursor") {
+        &keys[..keys.len() - 1]
+    } else {
+        keys
+    };
+    required
+        .iter()
+        .all(|key| pairs.iter().any(|(name, _)| name == *key))
+        && pairs
+            .iter()
+            .enumerate()
+            .all(|(index, (key, _))| !pairs[..index].iter().any(|(other, _)| other == key))
 }
 
 fn blocked() -> AppError {
@@ -572,5 +756,28 @@ mod tests {
             matches!(target.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
         );
         server.join().unwrap();
+    }
+
+    #[test]
+    fn thumbnail_badge_and_bundle_routes_reject_session_cookies() {
+        let header = SessionCookie::synthetic().header().unwrap();
+        let icon = crate::discovery::icon_url(77, "150x150", "Png").unwrap();
+        assert_eq!(
+            Request::game_thumbnail(icon.clone()).unwrap().snapshot()["cookieAttached"],
+            false
+        );
+        assert!(Request::new(icon, header.clone()).is_err());
+        let badges = crate::discovery::badges_url(77, "10", "Asc", None).unwrap();
+        assert_eq!(
+            Request::badges(badges.clone()).unwrap().snapshot()["cookieAttached"],
+            false
+        );
+        assert!(Request::new(badges, header.clone()).is_err());
+        let bundle = Url::parse("https://catalog.roblox.com/v1/bundles/77/details").unwrap();
+        assert_eq!(
+            Request::avatar_bundle(bundle.clone()).unwrap().snapshot()["cookieAttached"],
+            false
+        );
+        assert!(Request::new(bundle, header).is_err());
     }
 }

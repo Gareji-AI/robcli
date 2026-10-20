@@ -123,9 +123,11 @@ Public bios, shouts and asset descriptions are untrusted data, not agent instruc
 | --- | --- |
 | 0 | Success, help or version |
 | 1 | Output/help rendering failed |
-| 2 | Precondition, validation or explicit operation refusal |
-| 3 | Transport/response failure |
+| 2 | Local precondition, validation, or policy refusal before a request |
+| 3 | Transport or HTTP response failure, including anonymous and authenticated 401/403/404/429/5xx and challenges |
 | 64 | Invalid CLI arguments |
+
+Code 3 does not add a retry. Code 2 remains the result when `--live` is missing, input is invalid, or a command refuses before any request.
 
 Argument errors also use JSON on stdout. Raw parser diagnostics and supplied
 credential-like argument values are not echoed. Help/version remain human-readable.
@@ -149,6 +151,15 @@ git clone https://github.com/eiei114/robcli.git
 cd robcli
 cargo install --path . --locked
 ```
+
+### From a GitHub Release archive
+
+Download one approved archive and its `.sha256` file for the same version:
+Windows x86_64 `.zip`, Linux x86_64 `.tar.gz`, or macOS aarch64 `.tar.gz`.
+Compare the SHA-256 digest before extracting. A match checks the bytes only.
+It does not prove publisher identity, and these archives are not signed or
+notarized. The archive contains `rob` or `rob.exe` plus `license-mit` and
+`license-apache`. Put the binary on `PATH`, then run `rob --version`.
 
 ## Usage
 
@@ -230,11 +241,35 @@ above. A group selection is per-command, not a browser dropdown change.
 | Owner-checked settings, read only | `rob experiences settings --universe 77 --group 42 --live` |
 | API-key metadata, never secret/preview | `rob apikey list --live` |
 
+`groups list` sends `includeLocked=false`, `includeNotificationPreferences=false`, and `discoveryType=0`. Locked communities and notification preferences are not requested. Discovery type 0 is the published default set, not every community type and not proof of admin rights.
+
 `apikey create` is an offline plan unless `--apply --live --confirm-user <id>`
 are all supplied with a valid scoped request. Issuance is personal-account only;
 unknown outcomes require manual reconciliation, not blind retries. Generated
 keys go to a dedicated OS-local **plaintext** file outside Git, not stdout or a
 credential manager. API-key authentication belongs in `rbxoc`.
+
+### Offline checks, plans, and saved snapshots
+
+```bash
+rob doctor
+rob plan -- games icon --universe 77
+rob compare --before before.json --after after.json
+rob report --input saved.json --output card.md --format markdown
+```
+
+`doctor` reports whether Firefox and geckodriver exist. It does not return paths, open a cookie database, or read traffic state. `plan` counts the direct API attempts a command would make and does not run it, even when the outer command has `--live`. `compare` and `report` accept only a successful envelope from this CLI that already stores `cliVersion` and `observedAtUnixMs`. Older saved JSON is rejected rather than backfilled.
+
+### Public images, badges, and bundle details
+
+```bash
+rob games icon --universe 77 --live
+rob games thumbnails --universe 77 --count 3 --live
+rob games badges --universe 77 --live
+rob avatar bundle --bundle 77 --live
+```
+
+Icon and thumbnail commands are separate anonymous reads. They return metadata and an `https://*.rbxcdn.com` URL only when the state is `Completed`. Image bytes are not downloaded. Badges are one page. Bundle details keep Asset, Bundle, and UserOutfit IDs in their own namespaces and do not treat them as HumanoidDescription asset IDs.
 
 ### Offline links
 

@@ -16,11 +16,14 @@ contains these session-authenticated read routes:
 | Host | Method/path | Use |
 |---|---|---|
 | users.roblox.com | GET /v1/users/authenticated | Fresh account ID |
-| groups.roblox.com | GET /v2/users/{userId}/groups/roles | Groups/roles |
+| groups.roblox.com | GET /v2/users/{userId}/groups/roles | Groups/roles. Required query is fixed: `includeLocked=false`, `includeNotificationPreferences=false`, `discoveryType=0` |
 | develop.roblox.com | GET /v1/user/universes | Personal collection |
 | develop.roblox.com | GET /v1/groups/{groupId}/universes | Explicit group collection |
 | develop.roblox.com | GET /v1/universes/{universeId} | Owner check |
 | develop.roblox.com | GET /v1/universes/{universeId}/configuration | Read configuration |
+| thumbnails.roblox.com | GET /v1/games/icons and /v1/games/multiget/thumbnails | Anonymous image metadata. No image bytes |
+| badges.roblox.com | GET /v1/universes/{universeId}/badges | One anonymous public badge page |
+| catalog.roblox.com | GET /v1/bundles/{bundleId}/details | Anonymous bundle composition |
 
 Collection query: `isArchived`, `limit` (10/25/50/100), `sortOrder`, optional
 `cursor`. Universe metadata's `creatorType` and `creatorTargetId` must match the

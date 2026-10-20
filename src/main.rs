@@ -5,8 +5,12 @@ mod browser;
 mod cli;
 mod dashboard;
 mod discovery;
+mod doctor;
 mod error;
 mod keys;
+mod plan;
+mod release_archive;
+mod snapshot;
 mod social;
 mod store;
 mod traffic;
@@ -21,21 +25,80 @@ use serde_json::{Value, json};
 use crate::api::{Api, ListOptions};
 use crate::cli::{
     AnalyticsCommand, ApiKeyCommand, AvatarCommand, ChartCommand, Cli, Command, CommunityCommand,
-    DashboardCommand, ExperienceCommand, GameCommand, StoreCommand, UserCommand,
+    DashboardCommand, ExperienceCommand, GameCommand, ReportFormat, StoreCommand, UserCommand,
 };
 use crate::error::AppError;
 use crate::traffic::{Clock, SystemClock, TrafficGuard};
 
 fn success(command: &str, summary: &str, data: Value) -> Value {
-    json!({ "ok": true, "command": command, "summary": summary, "data": data, "hints": [] })
+    json!({ "ok": true, "command": command, "cliVersion": env!("CARGO_PKG_VERSION"), "summary": summary, "data": data, "hints": [] })
 }
 
 fn failure(command: &str, error: &AppError) -> Value {
-    json!({ "ok": false, "command": command, "summary": error.message, "error": error, "hints": [error.hint] })
+    json!({ "ok": false, "command": command, "cliVersion": env!("CARGO_PKG_VERSION"), "summary": error.message, "error": error, "hints": [error.hint] })
 }
 
 fn run(cli: Cli) -> Result<Value, AppError> {
     let command = cli.command.label();
+    match &cli.command {
+        Command::Doctor => {
+            let (firefox, driver) = doctor::local_presence();
+            return Ok(success(
+                command,
+                "Local tool presence only; Firefox, cookies, and traffic state were not opened",
+                doctor::report(firefox, driver),
+            ));
+        }
+        Command::Compare { before, after } => {
+            return Ok(success(
+                command,
+                "Offline snapshot comparison; no network or credential access",
+                snapshot::compare_files(before, after)?,
+            ));
+        }
+        Command::Report {
+            input,
+            output,
+            format,
+        } => {
+            let render = match format {
+                ReportFormat::Markdown => snapshot::RenderFormat::Markdown,
+                ReportFormat::Csv => snapshot::RenderFormat::Csv,
+            };
+            return Ok(success(
+                command,
+                "Offline report written to a new file; the input snapshot was not modified",
+                snapshot::render_file(input, output, render)?,
+            ));
+        }
+        Command::Plan { args } => {
+            let argv = std::iter::once(String::from("rob")).chain(args.iter().cloned());
+            let mut inner = match Cli::try_parse_from(argv) {
+                Ok(inner) => inner,
+                Err(_) => {
+                    let mut error = AppError::new(
+                        "invalid_arguments",
+                        "Invalid arguments.",
+                        "Run rob --help. The plan was not executed and argument values are not echoed.",
+                    );
+                    error.exit_code = 64;
+                    return Err(error);
+                }
+            };
+            if cli.live {
+                inner.live = true;
+            }
+            if inner.profile.is_none() {
+                inner.profile.clone_from(&cli.profile);
+            }
+            return Ok(success(
+                command,
+                "Request plan only; nothing was executed and no traffic lock was created",
+                plan::describe(&inner)?,
+            ));
+        }
+        _ => {}
+    }
     if matches!(
         &cli.command,
         Command::Users { .. } | Command::Communities { .. }
@@ -125,6 +188,38 @@ fn run(cli: Cli) -> Result<Value, AppError> {
                 target.validate()?;
                 page.validate()?;
             }
+            Command::Games {
+                command:
+                    GameCommand::Icon {
+                        universe,
+                        size,
+                        format,
+                    },
+            } => {
+                discovery::icon_url(*universe, size, format)?;
+            }
+            Command::Games {
+                command:
+                    GameCommand::Thumbnails {
+                        universe,
+                        size,
+                        format,
+                        count,
+                    },
+            } => {
+                discovery::thumbnail_url(*universe, size, format, *count)?;
+            }
+            Command::Games {
+                command:
+                    GameCommand::Badges {
+                        universe,
+                        limit,
+                        sort,
+                        cursor,
+                    },
+            } => {
+                discovery::badges_url(*universe, limit, sort, cursor.as_deref())?;
+            }
             _ => unreachable!(),
         }
     }
@@ -150,6 +245,15 @@ fn run(cli: Cli) -> Result<Value, AppError> {
                     "Offline avatar catalog links only; no appearance or ownership change",
                     avatar::links(kind, id)?,
                 ));
+            }
+            AvatarCommand::Bundle { bundle } => {
+                if *bundle == 0 || *bundle > i64::MAX as u64 {
+                    return Err(AppError::new(
+                        "avatar_query_invalid",
+                        "The avatar catalog query or typed target is invalid.",
+                        "Use one signed 64-bit Bundle ID. No credentials were accessed.",
+                    ));
+                }
             }
         }
     }
@@ -237,12 +341,19 @@ fn run(cli: Cli) -> Result<Value, AppError> {
         ));
     }
     if matches!(cli.command, Command::Schema) {
+        let version = env!("CARGO_PKG_VERSION");
+        let windows_archive = release_archive::archive_name(version, "windows", "x86_64")?;
+        let linux_archive = release_archive::archive_name(version, "linux", "x86_64")?;
+        let macos_archive = release_archive::archive_name(version, "macos", "aarch64")?;
+        release_archive::accept_members("windows", &["rob.exe", "license-mit", "license-apache"])?;
+        release_archive::accept_members("linux", &["rob", "license-mit", "license-apache"])?;
+        release_archive::accept_members("macos", &["rob", "license-mit", "license-apache"])?;
         return Ok(success(
             command,
             "Command schema and safety limits; no credentials were accessed",
             json!({
                 "project": "robcli", "binary": "rob", "version": env!("CARGO_PKG_VERSION"),
-                "commands": ["auth check", "whoami", "groups list", "experiences list", "experiences settings", "dashboard links", "analytics export", "apikey list", "apikey create", "store search", "store get", "store link", "avatar search", "avatar link", "charts sorts", "charts games", "charts music", "games get", "games music", "games passes", "games products", "users get", "users search", "users communities", "users games", "users link", "communities get", "communities search", "communities roles", "communities games", "communities link", "schema"],
+                "commands": ["auth check", "whoami", "groups list", "experiences list", "experiences settings", "dashboard links", "analytics export", "apikey list", "apikey create", "store search", "store get", "store link", "avatar search", "avatar link", "avatar bundle", "charts sorts", "charts games", "charts music", "games get", "games icon", "games thumbnails", "games badges", "games music", "games passes", "games products", "users get", "users search", "users communities", "users games", "users link", "communities get", "communities search", "communities roles", "communities games", "communities link", "compare", "report", "doctor", "plan", "schema"],
                 "authentication": { "browser": "firefox", "apiKey": false, "oauth": false, "cookieExport": false,
                     "creatorStore": "anonymous public GET only; no Cookie, API-key, OAuth, CSRF or Firefox lookup",
                     "avatarCatalog": "anonymous v2 search GET only; no Cookie, API-key, OAuth, CSRF or Firefox lookup",
@@ -270,11 +381,21 @@ fn run(cli: Cli) -> Result<Value, AppError> {
                 "publicDiscovery": { "gamesAlias":"places","maximumOutputPageSize":30,"automaticPagination":false,"detailFanout":false,
                     "placeAndUniverseIdsAreDistinct":true,"playingScope":"universe snapshot, not one subplace/server",
                     "gameDetailRequests":2,"placeResolutionExtraRequests":1,"music":"reported licensed Top Songs, not all BGM or live now-playing",
+                    "icon":"one GET thumbnails.roblox.com/v1/games/icons; targetId is the Universe; image bytes not downloaded",
+                    "thumbnails":"one GET thumbnails.roblox.com/v1/games/multiget/thumbnails; nested targetId is thumbnailId, not the Universe; image bytes not downloaded",
+                    "badges":"one GET badges.roblox.com/v1/universes/{universeId}/badges; one page only",
                     "purchases":false,"creatorManagement":false,"salesRevenue":false },
+                "groupsList": { "route": "GET https://groups.roblox.com/v2/users/{userId}/groups/roles",
+                    "includeLocked": false, "includeNotificationPreferences": false, "discoveryType": 0,
+                    "lockedCommunitiesRequested": false, "notificationPreferencesRequested": false,
+                    "discoverySemantics": "Published enum 0 only. Not locked communities, notification preferences, or every discovery type." },
                 "publicSocial": { "userAliases":["profile","profiles"],"communityAlias":"community","communityIdsAreApiGroupIds":true,
                     "maximumPageSize":25,"pageSizes":[10,25],"maximumLocalUnpagedOutput":25,"automaticPagination":false,"detailFanout":false,
                     "includePrivateRoles":false,"creationAccessFilter":"Public","memberRosterHarvest":false,"socialWrites":false,
                     "identityOrManagementPermissionsVerified":false },
+                "releaseArchives": { "windowsX86_64": windows_archive, "linuxX86_64": linux_archive, "macosAarch64": macos_archive,
+                    "members": ["binary", "license-mit", "license-apache"], "signed": false, "notarized": false,
+                    "checksumIsPublisherIdentity": false, "publishJob": "workflow_dispatch publish=true on an existing tag only" },
                 "scope": "Session-backed Dashboard and explicitly anonymous users/communities/charts/games/Store/avatar discovery. API-key/OAuth authentication stays separate in rbxoc."
             }),
         ));
@@ -359,6 +480,32 @@ fn run(cli: Cli) -> Result<Value, AppError> {
             Command::Games {
                 command: GameCommand::Products { target, page },
             } => client.commerce(target, page, false, &mut guard)?,
+            Command::Games {
+                command:
+                    GameCommand::Icon {
+                        universe,
+                        size,
+                        format,
+                    },
+            } => client.icon(*universe, size, format, &mut guard)?,
+            Command::Games {
+                command:
+                    GameCommand::Thumbnails {
+                        universe,
+                        size,
+                        format,
+                        count,
+                    },
+            } => client.thumbnails(*universe, size, format, *count, &mut guard)?,
+            Command::Games {
+                command:
+                    GameCommand::Badges {
+                        universe,
+                        limit,
+                        sort,
+                        cursor,
+                    },
+            } => client.badges(*universe, limit, sort, cursor.as_deref(), &mut guard)?,
             _ => unreachable!(),
         };
         return Ok(success(
@@ -391,6 +538,9 @@ fn run(cli: Cli) -> Result<Value, AppError> {
             AvatarCommand::Search(query) => {
                 data["collection"] = client.search(&query, &mut guard)?
             }
+            AvatarCommand::Bundle { bundle } => {
+                data["bundle"] = client.bundle(bundle, &mut guard)?
+            }
             AvatarCommand::Link(_) => {
                 return Err(AppError::new(
                     "command_not_dispatched",
@@ -399,6 +549,7 @@ fn run(cli: Cli) -> Result<Value, AppError> {
                 ));
             }
         }
+        data["observedAtUnixMs"] = SystemClock.now_ms()?.into();
         return Ok(success(
             command,
             "Read avatar catalog metadata without credentials or avatar changes",
@@ -430,6 +581,7 @@ fn run(cli: Cli) -> Result<Value, AppError> {
                 ));
             }
         }
+        data["observedAtUnixMs"] = SystemClock.now_ms()?.into();
         return Ok(success(
             command,
             "Read public Creator Store metadata without browser credentials",
@@ -648,6 +800,14 @@ fn emit(value: &Value) -> bool {
     serde_json::to_writer_pretty(&mut stdout, value).is_ok() && writeln!(stdout).is_ok()
 }
 
+fn status_after_emit(emitted: bool, semantic: u8) -> ExitCode {
+    if emitted {
+        ExitCode::from(semantic)
+    } else {
+        ExitCode::from(1)
+    }
+}
+
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -671,22 +831,26 @@ fn main() -> ExitCode {
                 "Run rob --help. API keys and raw cookies are not accepted as arguments.",
             );
             error.exit_code = 64;
-            emit(&failure("parse", &error));
-            return ExitCode::from(64);
+            return status_after_emit(emit(&failure("parse", &error)), 64);
         }
     };
     let command = cli.command.label();
     match run(cli) {
-        Ok(output) => {
-            if emit(&output) {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }
-        }
-        Err(error) => {
-            emit(&failure(command, &error));
-            ExitCode::from(error.exit_code)
+        Ok(output) => status_after_emit(emit(&output), 0),
+        Err(error) => status_after_emit(emit(&failure(command, &error)), error.exit_code),
+    }
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::status_after_emit;
+    use std::process::ExitCode;
+
+    #[test]
+    fn failed_output_overrides_semantic_exit_codes() {
+        for semantic in [0, 2, 3, 64] {
+            assert_eq!(status_after_emit(true, semantic), ExitCode::from(semantic));
+            assert_eq!(status_after_emit(false, semantic), ExitCode::from(1));
         }
     }
 }

@@ -380,14 +380,13 @@ impl<T: Transport> Social<T> {
                     _ => "social_request_failed",
                 }
             };
-            let mut e = AppError::new(
+            return Err(AppError::http(
                 code,
                 "The anonymous public profile/community read was refused; no retry or credential fallback was attempted.",
                 "Stop. Do not attach credentials, rotate accounts, bypass privacy settings or probe alternate endpoints to overcome a refusal.",
-            );
-            e.http_status = Some(r.status);
-            e.retry_after_seconds = r.retry_after_seconds;
-            return Err(e);
+                r.status,
+                r.retry_after_seconds,
+            ));
         }
         serde_json::from_slice(&r.body).map_err(|_| bad_reply())
     }
@@ -756,6 +755,7 @@ mod tests {
             c.transport.status = status;
             c.transport.challenge = status == 200;
             let e = c.user(77, &mut g).unwrap_err();
+            assert_eq!(e.exit_code, 3);
             assert!(!serde_json::to_string(&e).unwrap().contains("must-not-echo"));
             assert_eq!(c.transport.records.len(), 1);
             assert_eq!(c.transport.records[0]["cookieAttached"], false);
