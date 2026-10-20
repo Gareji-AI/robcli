@@ -285,10 +285,22 @@ impl<T: Transport> Api<T> {
         user_id: u64,
         guard: &mut TrafficGuard<C>,
     ) -> Result<Vec<GroupEntry>, AppError> {
+        if user_id == 0 || user_id > i64::MAX as u64 {
+            return Err(AppError::new(
+                "invalid_identity",
+                "The signed-in user ID is outside the signed 64-bit contract.",
+                "Stop. No group request was sent.",
+            ));
+        }
         let groups: Groups = self.read(
-            Url::parse(&format!(
-                "https://groups.roblox.com/v2/users/{user_id}/groups/roles"
-            ))
+            Url::parse_with_params(
+                &format!("https://groups.roblox.com/v2/users/{user_id}/groups/roles"),
+                [
+                    ("includeLocked", "false"),
+                    ("includeNotificationPreferences", "false"),
+                    ("discoveryType", "0"),
+                ],
+            )
             .unwrap(),
             guard,
         )?;
@@ -579,6 +591,48 @@ mod tests {
             api.transport.requests[0].as_str(),
             "https://users.roblox.com/v1/users/authenticated"
         );
+    }
+
+    #[test]
+    fn groups_list_sends_the_required_query_and_rejects_other_shapes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut api = api(vec![response(json!({ "data": [] }))]);
+        assert!(api.groups(77, &mut guard).unwrap().is_empty());
+        let pairs: std::collections::HashMap<_, _> =
+            api.transport.requests[0].query_pairs().collect();
+        assert_eq!(
+            pairs.get("includeLocked").map(|v| v.as_ref()),
+            Some("false")
+        );
+        assert_eq!(
+            pairs
+                .get("includeNotificationPreferences")
+                .map(|v| v.as_ref()),
+            Some("false")
+        );
+        assert_eq!(pairs.get("discoveryType").map(|v| v.as_ref()), Some("0"));
+        assert_eq!(api.transport.requests.len(), 1);
+        let header = SessionCookie::synthetic().header().unwrap();
+        let base = "https://groups.roblox.com/v2/users/77/groups/roles";
+        let good = format!(
+            "{base}?includeLocked=false&includeNotificationPreferences=false&discoveryType=0"
+        );
+        assert!(Request::new(Url::parse(&good).unwrap(), header.clone()).is_ok());
+        for url in [
+            base.to_owned(),
+            format!("{good}&extra=1"),
+            format!("{base}?includeLocked=false&includeLocked=false&includeNotificationPreferences=false&discoveryType=0"),
+            format!("{base}?includeLocked=true&includeNotificationPreferences=false&discoveryType=0"),
+            format!("{base}?includeLocked=false&includeNotificationPreferences=true&discoveryType=0"),
+            format!("{base}?includeLocked=false&includeNotificationPreferences=false&discoveryType=1"),
+            "https://groups.roblox.com/v2/users/9223372036854775808/groups/roles?includeLocked=false&includeNotificationPreferences=false&discoveryType=0".to_owned(),
+        ] {
+            assert!(
+                Request::new(Url::parse(&url).unwrap(), header.clone()).is_err(),
+                "{url}"
+            );
+        }
     }
 
     #[test]

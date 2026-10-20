@@ -1,5 +1,6 @@
 /target/
 /.robcli/
+/.ralph/
 .env
 .env.*
 *.log

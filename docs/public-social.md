@@ -36,10 +36,14 @@ The modern Community ID is the API Group ID. User IDs, Community IDs, role IDs,
 Universe IDs and Place IDs still have separate meanings.
 
 The old `groups list` remains session-backed and refers to the signed-in user's
-groups. It already used the same v2 membership path with an authenticated
-request. This release does not modify or de-authenticate that command: the new
-public `users communities --user <id>` uses a dedicated anonymous constructor,
-explicit User ID and fixed public flags instead.
+groups. It uses the same v2 membership path, now with the same explicit query as
+the anonymous command: `includeLocked=false`, `includeNotificationPreferences=false`,
+and `discoveryType=0`. Locked communities are not requested. Notification
+preferences are not requested or projected. Discovery type 0 is the published
+default set, not a complete inventory of every community type. The session
+constructor rejects a missing, duplicate, or different query. It does not
+de-authenticate the command: public `users communities --user <id>` still uses
+the anonymous constructor and an explicit User ID.
 
 ## Public metadata, not identity or management authority
 

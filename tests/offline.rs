@@ -759,6 +759,196 @@ fn environment_api_keys_and_raw_cookie_values_are_not_authentication_sources() {
     assert!(!String::from_utf8_lossy(&output.stderr).contains("synthetic-do-not-echo"));
 }
 
+#[test]
+fn closed_stdout_is_exit_1_for_success_runtime_and_parser_errors() {
+    for args in [&["schema"][..], &["whoami"], &["--definitely-invalid"]] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let status = Command::new(env!("CARGO_BIN_EXE_rob"))
+            .args(args)
+            .stdout(writer)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(1), "{args:?}");
+    }
+}
+
+#[test]
+fn dashboard_ids_use_the_signed_64_bit_contract_without_echoing_rejected_values() {
+    let root = tempfile::tempdir().unwrap();
+    let max = "9223372036854775807";
+    let over = "9223372036854775808";
+    let huge = "18446744073709551615";
+    let accepted = run(
+        root.path(),
+        &["dashboard", "links", "--universe", max, "--group", max],
+    );
+    assert_eq!(accepted.status.code(), Some(0));
+    assert_eq!(json(&accepted)["ok"], true);
+    for args in [
+        &["dashboard", "links", "--universe", over][..],
+        &["dashboard", "links", "--universe", huge],
+        &["dashboard", "links", "--universe", "77", "--group", huge],
+        &["experiences", "settings", "--universe", huge],
+        &["experiences", "list", "--group", over],
+        &["apikey", "list", "--group", huge],
+        &[
+            "apikey",
+            "create",
+            "--request",
+            "request.json",
+            "--secret-name",
+            "example",
+            "--confirm-user",
+            huge,
+        ],
+        &[
+            "analytics",
+            "export",
+            "--url",
+            "https://create.roblox.com/dashboard/creations/experiences/77/analytics/retention",
+            "--chart",
+            "Visits",
+            "--output",
+            "out.csv",
+            "--group",
+            huge,
+        ],
+    ] {
+        let output = run(root.path(), args);
+        assert_eq!(output.status.code(), Some(64), "{args:?}");
+        assert_eq!(json(&output)["error"]["code"], "invalid_arguments");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(!text.contains(over), "{args:?}");
+        assert!(!text.contains(huge), "{args:?}");
+    }
+    let over_url = format!(
+        "https://create.roblox.com/dashboard/creations/experiences/{huge}/analytics/retention"
+    );
+    let output = run(
+        root.path(),
+        &[
+            "analytics",
+            "export",
+            "--url",
+            &over_url,
+            "--chart",
+            "Visits",
+            "--output",
+            "over.csv",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json(&output)["error"]["code"], "analytics_url_invalid");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(huge));
+    let max_url = format!(
+        "https://create.roblox.com/dashboard/creations/experiences/{max}/analytics/retention?groupId={max}"
+    );
+    let output = run(
+        root.path(),
+        &[
+            "analytics",
+            "export",
+            "--url",
+            &max_url,
+            "--chart",
+            "Visits",
+            "--output",
+            "max.csv",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json(&output)["error"]["code"], "live_not_enabled");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn groups_list_schema_records_the_fixed_membership_query() {
+    let root = tempfile::tempdir().unwrap();
+    let schema = json(&run(root.path(), &["schema"]));
+    assert_eq!(schema["data"]["groupsList"]["includeLocked"], false);
+    assert_eq!(
+        schema["data"]["groupsList"]["includeNotificationPreferences"],
+        false
+    );
+    assert_eq!(schema["data"]["groupsList"]["discoveryType"], 0);
+    assert_eq!(
+        schema["data"]["groupsList"]["notificationPreferencesRequested"],
+        false
+    );
+}
+
+#[test]
+fn doctor_plan_compare_and_new_reads_stay_offline() {
+    let root = tempfile::tempdir().unwrap();
+    let doctor = run(root.path(), &["doctor"]);
+    assert_eq!(doctor.status.code(), Some(0));
+    let report = json(&doctor);
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["cliVersion"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(report["data"]["cookieDatabaseOpened"], false);
+    assert_eq!(report["data"]["trafficStateOpened"], false);
+    assert_eq!(report["data"]["pathsReturned"], false);
+    assert_eq!(report["data"]["publicReadsNeedFirefox"], false);
+    let rendered = String::from_utf8_lossy(&doctor.stdout);
+    assert!(!rendered.contains(root.path().to_str().unwrap()));
+
+    let plan = run(root.path(), &["--live", "plan", "--", "whoami"]);
+    assert_eq!(plan.status.code(), Some(0));
+    assert_eq!(json(&plan)["data"]["executes"], false);
+    assert_eq!(json(&plan)["data"]["trafficLockCreated"], false);
+    assert_eq!(json(&plan)["data"]["liveFlagPresent"], true);
+    assert_eq!(json(&plan)["data"]["maximumDirectApiAttempts"], 1);
+
+    let leaked = run(root.path(), &["plan", "--", "--cookie", "secret-value"]);
+    assert_eq!(leaked.status.code(), Some(64));
+    assert!(!String::from_utf8_lossy(&leaked.stdout).contains("secret-value"));
+
+    for args in [
+        &["games", "icon", "--universe", "77"][..],
+        &["games", "thumbnails", "--universe", "77"],
+        &["games", "badges", "--universe", "77"],
+        &["avatar", "bundle", "--bundle", "77"],
+    ] {
+        let output = run(root.path(), args);
+        assert_eq!(
+            json(&output)["error"]["code"],
+            "live_not_enabled",
+            "{args:?}"
+        );
+    }
+
+    let before = root.path().join("before.json");
+    let after = root.path().join("after.json");
+    std::fs::write(&before, r#"{"ok":true,"command":"games get"}"#).unwrap();
+    std::fs::write(&after, r#"{"ok":true,"command":"games get"}"#).unwrap();
+    let compared = run(
+        root.path(),
+        &[
+            "compare",
+            "--before",
+            before.to_str().unwrap(),
+            "--after",
+            after.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        json(&compared)["error"]["code"],
+        "snapshot_metadata_missing"
+    );
+    let schema = json(&run(root.path(), &["schema"]));
+    assert_eq!(schema["data"]["releaseArchives"]["signed"], false);
+    assert_eq!(
+        schema["data"]["releaseArchives"]["checksumIsPublisherIdentity"],
+        false
+    );
+    assert!(
+        !root.path().join("traffic.json").exists(),
+        "offline commands must not create traffic state"
+    );
+}
+
 fn walk(root: &Path) -> Vec<std::path::PathBuf> {
     let mut output = Vec::new();
     for entry in std::fs::read_dir(root).unwrap() {

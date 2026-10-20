@@ -1,6 +1,5 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, Read, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 #[cfg(windows)]
@@ -25,6 +24,12 @@ pub(crate) struct ExportOptions {
     group: Option<u64>,
 }
 
+fn signed_resource_id(value: &str) -> bool {
+    value
+        .parse::<u64>()
+        .is_ok_and(|id| (1..=i64::MAX as u64).contains(&id))
+}
+
 fn browser_error(code: &'static str, message: &'static str) -> AppError {
     AppError::new(
         code,
@@ -44,7 +49,7 @@ impl ExportOptions {
         let parts: Vec<_> = url.path_segments().into_iter().flatten().collect();
         let path_valid = parts.len() == 6
             && parts[..3] == ["dashboard", "creations", "experiences"]
-            && parts[3].parse::<u64>().is_ok_and(|id| id > 0)
+            && signed_resource_id(parts[3])
             && parts[4] == "analytics"
             && [
                 "retention",
@@ -68,7 +73,7 @@ impl ExportOptions {
             || query.iter().filter(|(key, _)| key == "groupId").count() > 1
             || query.iter().filter(|(key, _)| key == "annotation").count() > 1
             || query.iter().any(|(key, value)| match key.as_ref() {
-                "groupId" => !value.parse::<u64>().is_ok_and(|id| id > 0),
+                "groupId" => !signed_resource_id(value),
                 "annotation" => value != "Benchmark",
                 _ => true,
             })
@@ -107,7 +112,7 @@ impl ExportOptions {
     }
 
     pub fn with_group(mut self, group: Option<u64>) -> Result<Self, AppError> {
-        if group.is_some_and(|id| id == 0)
+        if group.is_some_and(|id| id == 0 || id > i64::MAX as u64)
             || (group.is_some() && self.group.is_some() && group != self.group)
         {
             return Err(browser_error(
@@ -319,7 +324,7 @@ pub(crate) fn export<C: Clock>(
     if !options.interactive_login {
         guard.reserve()?;
         ui.navigate("https://www.roblox.com/robots.txt")?;
-        ui.call(Method::POST, "cookie", Some(json!({ "cookie": { "name": ".ROBLOSECURITY", "value": cookie.browser_value(), "domain": ".roblox.com", "path": "/", "secure": true, "httpOnly": true, "sameSite": "Lax" } })))?;
+        ui.set_session_cookie(&cookie)?;
     }
     guard.reserve()?;
     ui.navigate(options.url.as_str())?;
@@ -399,7 +404,7 @@ fn control_failure(action: &str, phase: &str, status: Option<u16>, kind: &str) -
         "The owned browser action failed. Only fixed protocol categories are reported; no raw driver message is printed.",
     );
     error.details = Some(json!({ "browserControl": {
-        "action": select(action, &["navigate", "set_session_cookie", "read_session_cookie", "execute_script", "set_timeouts", "switch_context"]),
+        "action": select(action, &["navigate", "read_document_url", "set_session_cookie", "read_session_cookie", "execute_script", "set_timeouts", "switch_context"]),
         "phase": select(phase, &["none", "private_attestation", "target-probe", "probe", "menu", "menu-probe", "download"]),
         "driverHttpStatus": status,
         "webdriverError": select(kind, &["no such cookie", "no such window", "invalid session id", "javascript error", "invalid argument", "script timeout", "timeout", "unexpected alert open", "unsupported operation", "unknown command", "unknown error", "transport_failed", "response_read_failed", "invalid_response", "body_too_large"])
@@ -446,11 +451,298 @@ fn decode_driver_reply(
         .ok_or_else(|| control_failure(action, phase, Some(status), "invalid_response"))
 }
 
+fn parse_driver_port(line: &str) -> Option<u16> {
+    let rest = line.split("Listening on ").nth(1)?;
+    let token = rest.split_whitespace().next()?.trim_end_matches('/');
+    if !token.contains("127.0.0.1:") {
+        return None;
+    }
+    let port = token
+        .rsplit(':')
+        .next()?
+        .trim_matches(|c: char| !c.is_ascii_digit());
+    let port = port.parse().ok()?;
+    (port > 0).then_some(port)
+}
+
+#[cfg(windows)]
+fn read_driver_port(stderr: std::process::ChildStderr) -> Result<u16, AppError> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            if let Some(port) = parse_driver_port(&line) {
+                let _ = sender.send(port);
+            }
+            line.clear();
+        }
+    });
+    receiver.recv_timeout(Duration::from_secs(5)).map_err(|_| {
+        browser_error(
+            "driver_start_failed",
+            "The owned driver did not publish a loopback port.",
+        )
+    })
+}
+
+fn ensure_listener_owned(port: u16, expected_pid: u32) -> Result<(), AppError> {
+    match listener_owned_by(port, expected_pid) {
+        Ok(true) => Ok(()),
+        _ => Err(browser_error(
+            "driver_endpoint_unverified",
+            "The loopback driver port is not owned by the spawned driver. No session cookie was sent.",
+        )),
+    }
+}
+
+fn listener_owned_by(port: u16, expected_pid: u32) -> Result<bool, AppError> {
+    let mut pids = listener_pids(port)?;
+    pids.sort_unstable();
+    pids.dedup();
+    Ok(pids == [expected_pid])
+}
+
+fn deliver_owned_cookie(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    port: u16,
+    expected_pid: u32,
+    cookie: &SessionCookie,
+) -> Result<Value, AppError> {
+    ensure_listener_owned(port, expected_pid)?;
+    let body = json!({ "cookie": { "name": ".ROBLOSECURITY", "value": cookie.browser_value(), "domain": ".roblox.com", "path": "/", "secure": true, "httpOnly": true, "sameSite": "Lax" } });
+    let response = client
+        .post(endpoint)
+        .json(&body)
+        .send()
+        .map_err(|_| control_failure("set_session_cookie", "none", None, "transport_failed"))?;
+    let status = response.status().as_u16();
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    response.take(32769).read_to_end(&mut bytes).map_err(|_| {
+        control_failure(
+            "set_session_cookie",
+            "none",
+            Some(status),
+            "response_read_failed",
+        )
+    })?;
+    if bytes.len() > 32768 {
+        return Err(control_failure(
+            "set_session_cookie",
+            "none",
+            Some(status),
+            "body_too_large",
+        ));
+    }
+    decode_driver_reply(status, &bytes, "set_session_cookie", "none")
+}
+
+#[cfg(windows)]
+fn listener_pids(port: u16) -> Result<Vec<u32>, AppError> {
+    use std::mem::size_of;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+        TCP_TABLE_OWNER_PID_LISTENER,
+    };
+    let mut size = 0u32;
+    let _status = unsafe {
+        GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut size,
+            0,
+            2,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        )
+    };
+    if size == 0 {
+        return Err(browser_error(
+            "driver_endpoint_unverified",
+            "Cannot prove which process owns the loopback driver port.",
+        ));
+    }
+    let mut buffer = vec![0u32; usize::try_from(size).unwrap_or(0).div_ceil(4)];
+    if buffer.is_empty() {
+        return Err(browser_error(
+            "driver_endpoint_unverified",
+            "Cannot prove which process owns the loopback driver port.",
+        ));
+    }
+    let status = unsafe {
+        GetExtendedTcpTable(
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            0,
+            2,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        )
+    };
+    if status != 0 {
+        return Err(browser_error(
+            "driver_endpoint_unverified",
+            "Cannot prove which process owns the loopback driver port.",
+        ));
+    }
+    let table = buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID;
+    // SAFETY: GetExtendedTcpTable wrote an owner-PID listener table into `buffer`.
+    // The header is one u32 count followed by that many row records.
+    let count = unsafe { (*table).dwNumEntries } as usize;
+    let rows_at = unsafe { std::ptr::addr_of!((*table).table).cast::<MIB_TCPROW_OWNER_PID>() };
+    let bytes = usize::try_from(size).unwrap_or(0);
+    if count.saturating_mul(size_of::<MIB_TCPROW_OWNER_PID>()) + size_of::<u32>() > bytes {
+        return Err(browser_error(
+            "driver_endpoint_unverified",
+            "Cannot prove which process owns the loopback driver port.",
+        ));
+    }
+    let rows = unsafe { std::slice::from_raw_parts(rows_at, count) };
+    let loopback = u32::from_ne_bytes([127, 0, 0, 1]);
+    let mut pids = Vec::new();
+    for row in rows {
+        let local_port = u16::from_be(row.dwLocalPort as u16);
+        if local_port == port && (row.dwLocalAddr == loopback || row.dwLocalAddr == 0) {
+            pids.push(row.dwOwningPid);
+        }
+    }
+    Ok(pids)
+}
+
+#[cfg(target_os = "linux")]
+fn listener_pids(port: u16) -> Result<Vec<u32>, AppError> {
+    let mut inodes = Vec::new();
+    for name in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let text = std::fs::read_to_string(name).map_err(|_| {
+            browser_error(
+                "driver_endpoint_unverified",
+                "Cannot prove which process owns the loopback driver port.",
+            )
+        })?;
+        for line in text.lines().skip(1) {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() < 10 {
+                continue;
+            }
+            let local = fields[1];
+            let state = fields[3];
+            if state != "0A" {
+                continue;
+            }
+            let Some((addr, hex_port)) = local.split_once(':') else {
+                continue;
+            };
+            let Ok(parsed) = u16::from_str_radix(hex_port, 16) else {
+                continue;
+            };
+            if parsed != port {
+                continue;
+            }
+            let loopback = matches!(
+                addr,
+                "0100007F"
+                    | "0000000000000000000000000100007F"
+                    | "0000000000000000FFFF00000100007F"
+            );
+            let any = matches!(addr, "00000000" | "00000000000000000000000000000000");
+            if !loopback && !any {
+                continue;
+            }
+            let inode = fields[9];
+            if inode.is_empty() || inode == "0" {
+                return Err(browser_error(
+                    "driver_endpoint_unverified",
+                    "Cannot prove which process owns the loopback driver port.",
+                ));
+            }
+            inodes.push(inode.to_owned());
+        }
+    }
+    let mut pids = Vec::new();
+    for inode in inodes {
+        pids.push(pid_for_socket_inode(&inode)?);
+    }
+    Ok(pids)
+}
+
+#[cfg(target_os = "linux")]
+fn pid_for_socket_inode(inode: &str) -> Result<u32, AppError> {
+    let needle = format!("socket:[{inode}]");
+    let entries = std::fs::read_dir("/proc").map_err(|_| {
+        browser_error(
+            "driver_endpoint_unverified",
+            "Cannot prove which process owns the loopback driver port.",
+        )
+    })?;
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            if std::fs::read_link(fd.path()).is_ok_and(|target| target.to_string_lossy() == needle)
+            {
+                return Ok(pid);
+            }
+        }
+    }
+    Err(browser_error(
+        "driver_endpoint_unverified",
+        "Cannot prove which process owns the loopback driver port.",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn listener_pids(port: u16) -> Result<Vec<u32>, AppError> {
+    let output = std::process::Command::new("lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fp"])
+        .output()
+        .map_err(|_| {
+            browser_error(
+                "driver_endpoint_unverified",
+                "Cannot prove which process owns the loopback driver port.",
+            )
+        })?;
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !output.status.success() {
+        return Err(browser_error(
+            "driver_endpoint_unverified",
+            "Cannot prove which process owns the loopback driver port.",
+        ));
+    }
+    let mut pids = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(pid) = line.strip_prefix('p') {
+            pids.push(pid.trim().parse().map_err(|_| {
+                browser_error(
+                    "driver_endpoint_unverified",
+                    "Cannot prove which process owns the loopback driver port.",
+                )
+            })?);
+        }
+    }
+    Ok(pids)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn listener_pids(_port: u16) -> Result<Vec<u32>, AppError> {
+    Err(browser_error(
+        "driver_endpoint_unverified",
+        "Cannot prove which process owns the loopback driver port.",
+    ))
+}
+
 struct LocalDriver {
     _process: OwnedDriver,
     client: reqwest::blocking::Client,
     base: String,
     session: String,
+    port: u16,
+    driver_pid: u32,
     downloads: PathBuf,
     expected_url: String,
     expected_group: Option<String>,
@@ -458,24 +750,10 @@ struct LocalDriver {
 
 impl LocalDriver {
     fn launch(binary: &Path, downloads: &Path, options: &ExportOptions) -> Result<Self, AppError> {
-        let port = {
-            let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| {
-                browser_error(
-                    "driver_start_failed",
-                    "Cannot reserve a loopback driver port.",
-                )
-            })?;
-            listener
-                .local_addr()
-                .map_err(|_| {
-                    browser_error(
-                        "driver_start_failed",
-                        "Cannot inspect the owned loopback port.",
-                    )
-                })?
-                .port()
-        };
-        let mut process = OwnedDriver::spawn(binary, port)?;
+        let mut process = OwnedDriver::spawn(binary)?;
+        let port = process.port;
+        let driver_pid = process.pid();
+        ensure_listener_owned(port, driver_pid)?;
         let base = format!("http://127.0.0.1:{port}");
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
@@ -507,6 +785,7 @@ impl LocalDriver {
                 .and_then(|reply| reply.json::<Value>().ok())
                 .is_some_and(|value| value["value"]["ready"] == true);
             if ready {
+                ensure_listener_owned(port, driver_pid)?;
                 break;
             }
             if Instant::now() >= deadline {
@@ -517,6 +796,7 @@ impl LocalDriver {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+        ensure_listener_owned(port, driver_pid)?;
         let capabilities = private_capabilities(downloads, options.interactive_login);
         let response = client
             .post(format!("{base}/session"))
@@ -561,6 +841,8 @@ impl LocalDriver {
             client,
             base,
             session,
+            port,
+            driver_pid,
             downloads: downloads.to_path_buf(),
             expected_url: options.url.to_string(),
             expected_group: options.group.map(|id| id.to_string()),
@@ -575,6 +857,7 @@ impl LocalDriver {
             "moz/context",
             Some(json!({ "context": "chrome" })),
         )?;
+        ensure_listener_owned(port, driver_pid)?;
         let private = driver.call(Method::POST, "execute/sync", Some(json!({
             "script": "return ChromeUtils.importESModule('resource://gre/modules/PrivateBrowsingUtils.sys.mjs').PrivateBrowsingUtils.isWindowPrivate(window);",
             "args": []
@@ -593,14 +876,21 @@ impl LocalDriver {
         Ok(driver)
     }
 
+    fn set_session_cookie(&mut self, cookie: &SessionCookie) -> Result<Value, AppError> {
+        let endpoint = format!("{}/session/{}/cookie", self.base, self.session);
+        deliver_owned_cookie(&self.client, &endpoint, self.port, self.driver_pid, cookie)
+    }
+
     fn call(&mut self, method: Method, path: &str, body: Option<Value>) -> Result<Value, AppError> {
-        let action = match path {
-            "url" => "navigate",
-            "cookie" => "set_session_cookie",
-            "cookie/.ROBLOSECURITY" => "read_session_cookie",
-            "execute/sync" => "execute_script",
-            "timeouts" => "set_timeouts",
-            "moz/context" => "switch_context",
+        let action = match (method.clone(), path) {
+            (Method::GET, "url") => "read_document_url",
+            (_, "url") => "navigate",
+            (Method::GET, "cookie") => "read_session_cookie",
+            (_, "cookie") => "set_session_cookie",
+            (_, "cookie/.ROBLOSECURITY") => "read_session_cookie",
+            (_, "execute/sync") => "execute_script",
+            (_, "timeouts") => "set_timeouts",
+            (_, "moz/context") => "switch_context",
             _ => "unclassified",
         };
         let phase = if path == "execute/sync" {
@@ -631,19 +921,53 @@ impl LocalDriver {
     }
 
     fn owned_session_cookie(&mut self) -> Result<SessionCookie, AppError> {
-        let mut cookie = self.call(Method::GET, "cookie/.ROBLOSECURITY", None)?;
-        if cookie["name"] == ".ROBLOSECURITY"
-            && let Value::String(value) = cookie["value"].take()
+        ensure_listener_owned(self.port, self.driver_pid)?;
+        self.call(
+            Method::POST,
+            "moz/context",
+            Some(json!({ "context": "content" })),
+        )?;
+        let current = self.call(Method::GET, "url", None)?;
+        if current.as_str() != Some(self.expected_url.as_str()) {
+            return Err(browser_error(
+                "session_cookie_context_unverified",
+                "The owned browser document did not match the approved analytics URL. No cookie list was read.",
+            ));
+        }
+        ensure_listener_owned(self.port, self.driver_pid)?;
+        let cookies = self.call(Method::GET, "cookie", None)?;
+        let Some(cookies) = cookies.as_array() else {
+            return Err(browser_error(
+                "session_cookie_context_unverified",
+                "The owned browser did not return a session cookie list.",
+            ));
+        };
+        let mut value = None;
+        let mut matches = 0u8;
+        for cookie in cookies {
+            let domain = cookie["domain"].as_str().unwrap_or("");
+            if cookie["name"] == ".ROBLOSECURITY"
+                && (domain == ".roblox.com" || domain == "roblox.com")
+            {
+                matches = matches.saturating_add(1);
+                if let Some(text) = cookie["value"].as_str() {
+                    value = Some(text.to_owned());
+                }
+            }
+        }
+        if matches == 1
+            && let Some(value) = value
         {
             return SessionCookie::from_owned_browser(value);
         }
         Err(browser_error(
             "manual_login_session_missing",
-            "The owned browser did not have the expected session cookie after manual confirmation.",
+            "The owned browser did not have exactly one expected session cookie after manual confirmation.",
         ))
     }
 
     fn navigate(&mut self, url: &str) -> Result<(), AppError> {
+        ensure_listener_owned(self.port, self.driver_pid)?;
         self.call(Method::POST, "url", Some(json!({ "url": url })))?;
         Ok(())
     }
@@ -768,15 +1092,16 @@ impl Drop for LocalDriver {
 
 struct OwnedDriver {
     child: Child,
+    port: u16,
     #[cfg(windows)]
     job: Option<winjob::Job>,
 }
 
 impl OwnedDriver {
-    fn spawn(binary: &Path, port: u16) -> Result<Self, AppError> {
+    fn spawn(binary: &Path) -> Result<Self, AppError> {
         #[cfg(not(windows))]
         {
-            let _ = (binary, port);
+            let _ = binary;
             Err(browser_error(
                 "browser_platform_unsupported",
                 "Owned browser export is currently Windows-only.",
@@ -789,9 +1114,9 @@ impl OwnedDriver {
                     "--host",
                     "127.0.0.1",
                     "--port",
-                    &port.to_string(),
+                    "0",
                     "--log",
-                    "fatal",
+                    "info",
                     "--allow-system-access",
                 ])
                 .env_remove("MOZ_LOG")
@@ -808,7 +1133,7 @@ impl OwnedDriver {
                 .env("MOZ_CRASHREPORTER_DISABLE", "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|_| {
                     browser_error(
@@ -816,6 +1141,20 @@ impl OwnedDriver {
                         "Cannot launch the local Mozilla geckodriver.",
                     )
                 })?;
+            let stderr = child.stderr.take().ok_or_else(|| {
+                browser_error(
+                    "driver_start_failed",
+                    "Cannot read the owned driver startup stream.",
+                )
+            })?;
+            let port = match read_driver_port(stderr) {
+                Ok(port) => port,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            };
             let job = match winjob::Job::attach(&child) {
                 Ok(job) => job,
                 Err(error) => {
@@ -826,9 +1165,13 @@ impl OwnedDriver {
             };
             Ok(Self {
                 child,
+                port,
                 job: Some(job),
             })
         }
+    }
+    fn pid(&self) -> u32 {
+        self.child.id()
     }
     fn alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
@@ -953,6 +1296,138 @@ return {state:'ready'};
 mod tests {
     use super::*;
     use crate::traffic::tests::FakeClock;
+
+    #[test]
+    fn driver_log_port_accepts_only_ipv4_loopback() {
+        assert_eq!(
+            parse_driver_port("169\tgeckodriver\tINFO\tListening on 127.0.0.1:4444"),
+            Some(4444)
+        );
+        assert_eq!(parse_driver_port("Listening on 127.0.0.1:9\n"), Some(9));
+        assert_eq!(parse_driver_port("Listening on 0.0.0.0:4444"), None);
+        assert_eq!(parse_driver_port("Listening on 127.0.0.1:0"), None);
+    }
+
+    #[test]
+    fn this_process_owns_its_loopback_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(listener_owned_by(port, std::process::id()).unwrap());
+        assert!(!listener_owned_by(port, 0).unwrap());
+    }
+
+    #[test]
+    fn competing_listener_receives_no_session_cookie() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let captured = Arc::clone(&seen);
+        let server = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(700) {
+                if let Ok((mut socket, _)) = listener.accept() {
+                    socket
+                        .set_read_timeout(Some(Duration::from_millis(400)))
+                        .unwrap();
+                    let mut buf = [0u8; 8192];
+                    let mut all = Vec::new();
+                    loop {
+                        match socket.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(count) => all.extend_from_slice(&buf[..count]),
+                            Err(_) => break,
+                        }
+                    }
+                    let _ = write!(
+                        socket,
+                        "HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{{\"value\":1}}"
+                    );
+                    *captured.lock().unwrap() = all;
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_millis(400))
+            .build()
+            .unwrap();
+        let endpoint = format!("http://127.0.0.1:{port}/session/synthetic/cookie");
+        let error = deliver_owned_cookie(
+            &client,
+            &endpoint,
+            port,
+            0,
+            &crate::auth::SessionCookie::synthetic(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "driver_endpoint_unverified");
+        assert!(
+            !serde_json::to_string(&error)
+                .unwrap()
+                .contains("synthetic-test-only")
+        );
+        server.join().unwrap();
+        let captured = seen.lock().unwrap();
+        let body = String::from_utf8_lossy(&captured);
+        assert!(body.is_empty(), "{body}");
+    }
+
+    #[test]
+    fn owned_endpoint_proof_allows_a_synthetic_cookie_only_for_this_process() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let captured = Arc::clone(&seen);
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_millis(400)))
+                .unwrap();
+            let mut buf = [0u8; 8192];
+            let mut all = Vec::new();
+            loop {
+                match socket.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(count) => all.extend_from_slice(&buf[..count]),
+                    Err(_) => break,
+                }
+            }
+            let _ = write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{{\"value\":true}}"
+            );
+            *captured.lock().unwrap() = all;
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let endpoint = format!("http://127.0.0.1:{port}/session/synthetic/cookie");
+        let value = deliver_owned_cookie(
+            &client,
+            &endpoint,
+            port,
+            std::process::id(),
+            &crate::auth::SessionCookie::synthetic(),
+        )
+        .unwrap();
+        assert_eq!(value, json!(true));
+        server.join().unwrap();
+        let captured = seen.lock().unwrap();
+        let body = String::from_utf8_lossy(&captured);
+        assert!(body.contains("synthetic-test-only"));
+        assert!(!body.contains("Cookie:"));
+    }
 
     #[test]
     fn webdriver_failure_distinguishes_cookie_and_script_actions_without_private_messages() {
@@ -1114,6 +1589,35 @@ mod tests {
             )
             .is_err()
         );
+        let max = i64::MAX.to_string();
+        let over = (i64::MAX as u64 + 1).to_string();
+        let accepted = ExportOptions::validate(
+            &format!(
+                "https://create.roblox.com/dashboard/creations/experiences/{max}/analytics/retention?groupId={max}"
+            ),
+            "Day 1 retention",
+            &root.path().join("max.csv"),
+        )
+        .unwrap();
+        assert_eq!(accepted.universe, i64::MAX as u64);
+        assert_eq!(accepted.group, Some(i64::MAX as u64));
+        for url in [
+            format!(
+                "https://create.roblox.com/dashboard/creations/experiences/{over}/analytics/retention"
+            ),
+            format!(
+                "https://create.roblox.com/dashboard/creations/experiences/77/analytics/retention?groupId={over}"
+            ),
+        ] {
+            let Err(error) =
+                ExportOptions::validate(&url, "Day 1 retention", &root.path().join("over.csv"))
+            else {
+                panic!("an ID above i64::MAX must be rejected");
+            };
+            assert_eq!(error.code, "analytics_url_invalid");
+            assert!(!serde_json::to_string(&error).unwrap().contains(&over));
+        }
+        assert!(accepted.with_group(Some(u64::MAX)).is_err());
     }
 
     struct Scripted {

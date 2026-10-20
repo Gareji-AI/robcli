@@ -427,14 +427,13 @@ impl<T: Transport> Avatar<T> {
                     _ => "avatar_request_failed",
                 }
             };
-            let mut error = AppError::new(
+            return Err(AppError::http(
                 code,
                 "The anonymous avatar catalog request was refused; no retry or credential fallback was attempted.",
                 "Stop. No Cookie, CSRF-token handshake, account change or alternate endpoint is used to bypass a refusal.",
-            );
-            error.http_status = Some(response.status);
-            error.retry_after_seconds = response.retry_after_seconds;
-            return Err(error);
+                response.status,
+                response.retry_after_seconds,
+            ));
         }
         serde_json::from_slice(&response.body).map_err(|_| bad_reply())
     }
@@ -475,6 +474,82 @@ impl<T: Transport> Avatar<T> {
             json!({"query":query.query,"count":cards.len(),"items":cards,"hasMore":next.is_some(),"nextPageCursor":next,
             "previousPageCursor":previous,"automaticPagination":false,"detailFanout":false,"currency":"Robux"}),
         )
+    }
+
+    pub fn bundle<C: Clock>(
+        &mut self,
+        id: u64,
+        guard: &mut TrafficGuard<C>,
+    ) -> Result<Value, AppError> {
+        if id == 0 || id > i64::MAX as u64 {
+            return Err(invalid());
+        }
+        let url = Url::parse(&format!(
+            "https://catalog.roblox.com/v1/bundles/{id}/details"
+        ))
+        .unwrap();
+        let body: Value = self.read(Request::avatar_bundle(url)?, guard)?;
+        if body.get("id").and_then(Value::as_u64) != Some(id) {
+            return Err(bad_reply());
+        }
+        let name = body
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|value| text_ok(value, 4096))
+            .ok_or_else(bad_reply)?;
+        let items = body
+            .get("items")
+            .and_then(Value::as_array)
+            .filter(|items| items.len() <= 100)
+            .ok_or_else(bad_reply)?;
+        let mut cards = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for item in items {
+            let item_id = item
+                .get("id")
+                .and_then(Value::as_u64)
+                .filter(|value| *value > 0 && *value <= i64::MAX as u64)
+                .ok_or_else(bad_reply)?;
+            let reported = item.get("type").and_then(Value::as_str).unwrap_or("");
+            let kind = match reported {
+                "Asset" => "Asset",
+                "Bundle" => "Bundle",
+                "UserOutfit" => "UserOutfit",
+                _ => "unsupported",
+            };
+            if kind != "unsupported" && !seen.insert((kind, item_id)) {
+                return Err(bad_reply());
+            }
+            let reported_type = if kind == "unsupported"
+                && reported.len() <= 64
+                && reported.chars().all(|c| c.is_ascii_alphanumeric())
+            {
+                Some(reported)
+            } else {
+                None
+            };
+            cards.push(json!({
+                "id": item_id,
+                "kind": kind,
+                "reportedType": reported_type,
+                "name": item.get("name").and_then(Value::as_str).filter(|value| text_ok(value, 4096)),
+                "usableAsHumanoidDescriptionAssetId": false,
+                "outfitExpanded": false
+            }));
+        }
+        Ok(json!({
+            "bundleId": id,
+            "name": name,
+            "bundleType": body.get("bundleType").and_then(Value::as_str).filter(|value| text_ok(value, 64)),
+            "items": cards,
+            "ownershipVerified": false,
+            "purchasePerformed": false,
+            "appearanceApplied": false,
+            "rigCompatibilityVerified": false,
+            "studioApplicationVerified": false,
+            "detailFanout": false,
+            "humanoidDescriptionAssetIds": false
+        }))
     }
 }
 
@@ -628,6 +703,48 @@ mod tests {
     }
 
     #[test]
+    fn bundle_details_keep_typed_ids_and_reject_a_mismatched_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let mut guard =
+            crate::traffic::TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut client = Avatar::new(FakeTransport {
+            status: 200,
+            records: Vec::new(),
+            body: json!({
+                "id": 77,
+                "name": "Synthetic Bundle",
+                "bundleType": "BodyParts",
+                "items": [
+                    {"id": 11, "type": "Asset", "name": "Head"},
+                    {"id": 22, "type": "UserOutfit", "name": "Look"},
+                    {"id": 33, "type": "Mystery", "name": "Unknown"}
+                ]
+            }),
+        });
+        let result = client.bundle(77, &mut guard).unwrap();
+        assert_eq!(result["items"][0]["kind"], "Asset");
+        assert_eq!(result["items"][1]["kind"], "UserOutfit");
+        assert_eq!(result["items"][2]["kind"], "unsupported");
+        assert_eq!(
+            result["items"][0]["usableAsHumanoidDescriptionAssetId"],
+            false
+        );
+        assert_eq!(result["humanoidDescriptionAssetIds"], false);
+        assert_eq!(client.transport.records[0]["cookieAttached"], false);
+        assert!(
+            client.transport.records[0]["url"]
+                .as_str()
+                .unwrap()
+                .ends_with("/v1/bundles/77/details")
+        );
+        client.transport.body = json!({"id": 88, "name": "Other", "items": []});
+        assert_eq!(
+            client.bundle(77, &mut guard).unwrap_err().code,
+            "avatar_response_invalid"
+        );
+    }
+
+    #[test]
     fn malformed_ids_or_unknown_item_namespaces_never_fabricate_an_appearance() {
         for (id, kind) in [(0, "Asset"), (77, "UserOutfit")] {
             let root = tempfile::tempdir().unwrap();
@@ -680,6 +797,7 @@ mod tests {
                     &mut guard,
                 )
                 .unwrap_err();
+            assert_eq!(error.exit_code, 3);
             assert!(
                 !serde_json::to_string(&error)
                     .unwrap()

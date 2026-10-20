@@ -26,9 +26,16 @@ avatar/outfit save, actual try-on rendering, asset/source download or Studio IPC
   explicitly says users do not receive catalog items they do not own when saving
   an avatar/outfit; inventory access, save prompts and purchases are separate flows.
 
-## One supported public route
+## Supported public routes
 
-`GET https://catalog.roblox.com/v2/search/items/details`
+Search: `GET https://catalog.roblox.com/v2/search/items/details`
+
+Bundle details: `GET https://catalog.roblox.com/v1/bundles/{bundleId}/details`
+
+The bundle route has no query. Item `type` stays `Asset`, `Bundle`, or
+`UserOutfit`. Any other type is `unsupported` and is not coerced into an Asset
+or used as a HumanoidDescription asset ID. Outfits are not expanded. The bundle
+ID is not treated as an asset ID.
 
 The constructor accepts only this host/path and an allowlist of published query
 keys. Cookie, Authorization, API-key and CSRF headers are absent. Session-backed

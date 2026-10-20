@@ -1,0 +1,57 @@
+"""Pack one approved robcli archive. Checksums are not a publisher signature."""
+
+import argparse
+import hashlib
+import pathlib
+import tarfile
+import zipfile
+
+APPROVED = {
+    ("windows", "x86_64"): ("rob.exe", "zip"),
+    ("linux", "x86_64"): ("rob", "tar.gz"),
+    ("macos", "aarch64"): ("rob", "tar.gz"),
+}
+LICENSES = ("license-mit", "license-apache")
+
+
+def archive_name(version: str, system: str, arch: str) -> tuple[str, str]:
+    binary, extension = APPROVED[(system, arch)]
+    return f"robcli-{version}-{system}-{arch}.{extension}", binary
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--os", required=True, dest="system")
+    parser.add_argument("--arch", required=True)
+    parser.add_argument("--binary", required=True, type=pathlib.Path)
+    parser.add_argument("--licenses", required=True, type=pathlib.Path)
+    parser.add_argument("--out", required=True, type=pathlib.Path)
+    args = parser.parse_args()
+    name, binary_name = archive_name(args.version, args.system, args.arch)
+    if args.binary.name != binary_name or not args.binary.is_file():
+        raise SystemExit("binary name is outside the approved archive member list")
+    licenses = [args.licenses / item for item in LICENSES]
+    if any(not path.is_file() for path in licenses):
+        raise SystemExit("license files are missing")
+    args.out.mkdir(parents=True, exist_ok=True)
+    destination = args.out / name
+    if destination.exists():
+        raise SystemExit("archive already exists; refusing to replace it")
+    members = [args.binary, *licenses]
+    if name.endswith(".zip"):
+        with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in members:
+                archive.write(path, arcname=path.name)
+    else:
+        with tarfile.open(destination, "w:gz") as archive:
+            for path in members:
+                archive.add(path, arcname=path.name)
+    digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+    checksum = args.out / f"{name}.sha256"
+    checksum.write_text(f"{digest}  {name}\n", encoding="utf-8")
+    print(checksum)
+
+
+if __name__ == "__main__":
+    main()

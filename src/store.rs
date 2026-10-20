@@ -374,14 +374,13 @@ impl<T: Transport> Store<T> {
                     _ => "store_request_failed",
                 }
             };
-            let mut error = AppError::new(
+            return Err(AppError::http(
                 code,
                 "The public Creator Store request was refused; no retry or credential fallback was attempted.",
                 "Stop. Do not add cookies/API keys, switch accounts or probe alternate endpoints to bypass a refusal.",
-            );
-            error.http_status = Some(response.status);
-            error.retry_after_seconds = response.retry_after_seconds;
-            return Err(error);
+                response.status,
+                response.retry_after_seconds,
+            ));
         }
         serde_json::from_slice(&response.body).map_err(|_| bad_reply())
     }
@@ -583,6 +582,7 @@ mod tests {
                 body: json!({ "error": "must-not-echo" }),
             });
             let error = store.get(77, &mut guard).unwrap_err();
+            assert_eq!(error.exit_code, 3);
             assert!(
                 !serde_json::to_string(&error)
                     .unwrap()
@@ -676,7 +676,9 @@ mod tests {
             },
         ];
         for query in invalid_queries {
-            assert_eq!(query.url().unwrap_err().code, "store_search_invalid");
+            let error = query.url().unwrap_err();
+            assert_eq!(error.code, "store_search_invalid");
+            assert_eq!(error.exit_code, 2);
         }
     }
 }

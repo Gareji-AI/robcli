@@ -40,4 +40,20 @@ impl AppError {
         error.exit_code = 3;
         error
     }
+
+    /// HTTP and challenge failures are transport/response results (exit 3).
+    /// Local validation stays on `new` (exit 2). No retry is implied.
+    pub fn http(
+        code: &'static str,
+        message: &'static str,
+        hint: &'static str,
+        status: u16,
+        retry_after_seconds: Option<u64>,
+    ) -> Self {
+        let mut error = Self::new(code, message, hint);
+        error.http_status = Some(status);
+        error.retry_after_seconds = retry_after_seconds;
+        error.exit_code = 3;
+        error
+    }
 }

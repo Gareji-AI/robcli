@@ -138,4 +138,21 @@ detail POST retry, Dashboard CSV attempt, login or key issuance followed.
 Individual detail/vote endpoints, Place resolution, sort listing, other chart
 filters/pages, unavailable/restricted targets and empty music cases have mocks
 and/or published contracts, **not live verification in this increment**.
-The separate Dashboard WebDriver named-cookie 404 remains unresolved.
+The separate Dashboard CSV export is still not a claimed live success. See
+[verification](verification.md).
+
+## Icons, thumbnails, and badges
+
+These are separate anonymous commands. They are not folded into `games get`.
+
+| CLI | Route | Bound |
+|---|---|---|
+| `games icon` | `GET thumbnails.roblox.com/v1/games/icons` | one Universe, sizes 50x50, 128x128, 150x150, 256x256, 512x512 |
+| `games thumbnails` | `GET thumbnails.roblox.com/v1/games/multiget/thumbnails` | one Universe, count 1..=10, sizes 768x432, 576x324, 480x270, 384x216, 256x144 |
+| `games badges` | `GET badges.roblox.com/v1/universes/{id}/badges` | one page, limit 10/25/50/100, sort Asc/Desc, optional opaque cursor |
+
+`format` is `Png` or `Jpeg`. `isCircular=false` is fixed. Only `Completed`
+exposes an `https://*.rbxcdn.com` image URL. Pending, Blocked, Error, InReview,
+and TemporarilyUnavailable set `imageReady` false and `imageUrl` null even if a
+URL was returned. Image bytes are not fetched. An empty badge page is not proof
+that the experience has no badges. Win rate is not completion or churn.

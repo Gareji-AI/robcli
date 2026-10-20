@@ -40,6 +40,16 @@ After acceptance, verify version, repository, license and archive checksum, then
 test an install from crates.io into a separate temporary root and run only
 offline help/schema/link commands.
 
+Binary archives are separate from the crates.io package. The approved matrix is
+Windows x86_64 (`.zip`), Linux x86_64 (`.tar.gz`), and macOS aarch64 (`.tar.gz`).
+Each archive contains only `rob` or `rob.exe`, `license-mit`, and `license-apache`.
+SHA-256 checksums identify the bytes. They do not prove publisher identity.
+There is no code signing or notarization. CI on a pull request builds the
+archives with `contents: read` and uploads them as Actions artifacts. Upload to
+a GitHub Release happens only from `workflow_dispatch` with `publish=true` and
+an existing tag. That job does not replace an existing asset. It does not mint
+a new version.
+
 Create the matching Git tag/GitHub Release after confirming registry acceptance.
 Do not rewrite a published tag/version. Subsequent source fixes use a new patch
 version. No credentials or real Roblox probes are required for CI or installation
