@@ -14,7 +14,19 @@ APPROVED = {
 LICENSES = ("license-mit", "license-apache")
 
 
+def plain_version(version: str) -> bool:
+    return (
+        bool(version)
+        and all(char.isdigit() or char == "." for char in version)
+        and not version.startswith(".")
+        and not version.endswith(".")
+        and ".." not in version
+    )
+
+
 def archive_name(version: str, system: str, arch: str) -> tuple[str, str]:
+    if not plain_version(version):
+        raise ValueError("version is not a plain numeric release")
     binary, extension = APPROVED[(system, arch)]
     return f"robcli-{version}-{system}-{arch}.{extension}", binary
 
@@ -28,7 +40,10 @@ def main() -> None:
     parser.add_argument("--licenses", required=True, type=pathlib.Path)
     parser.add_argument("--out", required=True, type=pathlib.Path)
     args = parser.parse_args()
-    name, binary_name = archive_name(args.version, args.system, args.arch)
+    try:
+        name, binary_name = archive_name(args.version, args.system, args.arch)
+    except (KeyError, ValueError) as error:
+        raise SystemExit(str(error) or "target is outside the approved archive matrix") from error
     if args.binary.name != binary_name or not args.binary.is_file():
         raise SystemExit("binary name is outside the approved archive member list")
     licenses = [args.licenses / item for item in LICENSES]

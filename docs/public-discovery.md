@@ -151,7 +151,10 @@ These are separate anonymous commands. They are not folded into `games get`.
 | `games thumbnails` | `GET thumbnails.roblox.com/v1/games/multiget/thumbnails` | one Universe, count 1..=10, sizes 768x432, 576x324, 480x270, 384x216, 256x144 |
 | `games badges` | `GET badges.roblox.com/v1/universes/{id}/badges` | one page, limit 10/25/50/100, sort Asc/Desc, optional opaque cursor |
 
-`format` is `Png` or `Jpeg`. `isCircular=false` is fixed. Only `Completed`
+Icon `targetId` is the Universe ID. `games thumbnails` reads the parent
+`universeId`, then each nested `thumbnails[].targetId` as `thumbnailId`. That
+nested ID is the thumbnail image, not the Universe, and it is not copied into
+`targetId`. `format` is `Png` or `Jpeg`. `isCircular=false` is fixed. Only `Completed`
 exposes an `https://*.rbxcdn.com` image URL. Pending, Blocked, Error, InReview,
 and TemporarilyUnavailable set `imageReady` false and `imageUrl` null even if a
 URL was returned. Image bytes are not fetched. An empty badge page is not proof

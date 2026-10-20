@@ -44,6 +44,16 @@ Binary archives are separate from the crates.io package. The approved matrix is
 Windows x86_64 (`.zip`), Linux x86_64 (`.tar.gz`), and macOS aarch64 (`.tar.gz`).
 Each archive contains only `rob` or `rob.exe`, `license-mit`, and `license-apache`.
 SHA-256 checksums identify the bytes. They do not prove publisher identity.
+
+Download one archive and its `.sha256` file from the GitHub Release for the
+same version. Verify the checksum before extracting. On Windows, `CertUtil
+-hashfile robcli-<version>-windows-x86_64.zip SHA256` and compare it with the
+digest in the `.sha256` file. On Linux or macOS, `sha256sum -c
+robcli-<version>-<os>-<arch>.tar.gz.sha256` from the directory that contains
+both files. Extract with `tar -xzf` or the platform zip tool. Put `rob` or
+`rob.exe` on `PATH`. Run `rob --version`, `rob schema`, and `rob users link
+--user 1`. Those checks stay offline. A matching checksum is not a publisher
+signature, and the archives are not code-signed or notarized.
 There is no code signing or notarization. CI on a pull request builds the
 archives with `contents: read` and uploads them as Actions artifacts. Upload to
 a GitHub Release happens only from `workflow_dispatch` with `publish=true` and

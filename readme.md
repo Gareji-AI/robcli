@@ -152,6 +152,15 @@ cd robcli
 cargo install --path . --locked
 ```
 
+### From a GitHub Release archive
+
+Download one approved archive and its `.sha256` file for the same version:
+Windows x86_64 `.zip`, Linux x86_64 `.tar.gz`, or macOS aarch64 `.tar.gz`.
+Compare the SHA-256 digest before extracting. A match checks the bytes only.
+It does not prove publisher identity, and these archives are not signed or
+notarized. The archive contains `rob` or `rob.exe` plus `license-mit` and
+`license-apache`. Put the binary on `PATH`, then run `rob --version`.
+
 ## Usage
 
 Choose **one** live operation at a time. Examples below are alternatives, not a

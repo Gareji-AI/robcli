@@ -84,7 +84,7 @@ fn render_value(value: &Value, format: &RenderFormat) -> Result<String, AppError
             "# {command}\n\ncliVersion: {version}\n\nobservedAtUnixMs: {observed}\n\n{note}\n\n{filters}\n\n{table}\n",
             command = snap.command,
             version = snap.version,
-            filters = snap.filter_line(),
+            filters = md_cell(&snap.filter_line()),
             table = markdown(&header, &rows)
         )),
         RenderFormat::Csv => {
@@ -450,7 +450,10 @@ fn index_items(result: &Value, key: &str) -> Result<BTreeMap<u64, Value>, AppErr
 fn require_equal(before: &Value, after: &Value, keys: &[&str]) -> Result<(), AppError> {
     if keys
         .iter()
-        .any(|key| before.get(*key).is_none() || before[key] != after[key])
+        .any(|key| match (before.get(*key), after.get(*key)) {
+            (Some(left), Some(right)) => left != right,
+            _ => true,
+        })
     {
         return Err(incompatible(
             "Country, device, sort, Universe, or requested page range does not match. Missing page metadata is not inferred.",
@@ -553,10 +556,22 @@ fn markdown(header: &[String], rows: &[Vec<String>]) -> String {
     format!("| {head} |\n| {rule} |\n{body}")
 }
 fn md_cell(value: &str) -> String {
-    value
-        .replace('|', "\\|")
-        .replace(['\n', '\r'], " ")
-        .replace('`', "'")
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\n' | '\r' => out.push(' '),
+            '`' => out.push('\''),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '|' | '[' | ']' | '!' | '\\' | '*' | '_' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 fn csv_row(cells: &[&str]) -> String {
     cells
@@ -632,7 +647,7 @@ fn metadata() -> AppError {
     AppError::new(
         "snapshot_metadata_missing",
         "The snapshot is missing command, cliVersion, observedAtUnixMs, or result metadata.",
-        "Envelopes from before 0.7.0 did not record cliVersion or requested page metadata. Those values are not inferred or backfilled.",
+        "Older envelopes may not record cliVersion or requested page metadata. Those values are not inferred or backfilled.",
     )
 }
 fn version_mismatch() -> AppError {
@@ -735,6 +750,19 @@ mod tests {
         .unwrap();
         assert!(diff["diff"]["rows"][0]["priceChanged"].is_null());
         assert_eq!(diff["diff"]["unknownPriceIsNotFree"], true);
+        let mut after = env(
+            "games products",
+            json!({"universeId": 77, "requestedPageToken": null, "requestedLimit": 10, "items": []}),
+        );
+        let before = after.clone();
+        after["data"]["result"]
+            .as_object_mut()
+            .unwrap()
+            .remove("requestedPageToken");
+        assert_eq!(
+            compare_values(&before, &after).unwrap_err().code,
+            "snapshot_incompatible"
+        );
     }
 
     #[test]
@@ -758,7 +786,7 @@ mod tests {
     fn report_escapes_formula_and_markdown_and_refuses_overwrite() {
         let input = json!({
             "ok": true, "command": "games products", "cliVersion": "0.7.0",
-            "data": {"observedAtUnixMs": 10, "result": {"universeId": 77, "requestedPageToken": null, "requestedLimit": 10, "items": [
+            "data": {"observedAtUnixMs": 10, "result": {"universeId": 77, "requestedPageToken": "![x](https://tracker.example/a.png)", "requestedLimit": 10, "items": [
                 {"productId": 5, "name": "=cmd| <script>", "priceInRobux": null, "isForSale": false}
             ]}}
         });
@@ -768,6 +796,10 @@ mod tests {
         assert!(!csv.contains(",0 Robux") && !csv.contains(",free"));
         let md = render_value(&input, &RenderFormat::Markdown).unwrap();
         assert!(md.contains("\\|"));
+        assert!(md.contains("&lt;script&gt;"));
+        assert!(!md.contains("<script>"));
+        assert!(md.contains("\\!\\[x\\]"));
+        assert!(!md.contains("![x](https://tracker.example"));
         assert!(md.contains("Untrusted"));
         let root = tempfile::tempdir().unwrap();
         let src = root.path().join("in.json");

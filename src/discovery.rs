@@ -325,10 +325,7 @@ fn one_thumbnail(value: &Value, universe: u64) -> Result<&Value, AppError> {
     }
     Ok(&rows[0])
 }
-fn thumbnail_card(universe: u64, size: &str, format: &str, row: &Value) -> Result<Value, AppError> {
-    if row.get("targetId").and_then(Value::as_u64) != Some(universe) {
-        return Err(bad_reply());
-    }
+fn media_state(row: &Value) -> Result<(String, bool, Option<String>), AppError> {
     let state = opt_string(row, "state")?
         .filter(|value| text_ok(value, 64))
         .ok_or_else(bad_reply)?;
@@ -342,9 +339,34 @@ fn thumbnail_card(universe: u64, size: &str, format: &str, row: &Value) -> Resul
     } else {
         None
     };
+    Ok((state, ready, image))
+}
+fn thumbnail_card(universe: u64, size: &str, format: &str, row: &Value) -> Result<Value, AppError> {
+    if row.get("targetId").and_then(Value::as_u64) != Some(universe) {
+        return Err(bad_reply());
+    }
+    let (state, ready, image) = media_state(row)?;
     Ok(json!({
         "targetId": universe, "state": state, "imageReady": ready, "imageUrl": image,
         "size": size, "format": format, "imageBytesFetched": false, "rightsVerified": false, "ctrEstimated": false
+    }))
+}
+fn thumbnail_image_card(
+    universe: u64,
+    size: &str,
+    format: &str,
+    row: &Value,
+) -> Result<Value, AppError> {
+    let thumbnail_id = row
+        .get("targetId")
+        .and_then(Value::as_u64)
+        .filter(|id| valid_id(*id))
+        .ok_or_else(bad_reply)?;
+    let (state, ready, image) = media_state(row)?;
+    Ok(json!({
+        "universeId": universe, "thumbnailId": thumbnail_id, "state": state,
+        "imageReady": ready, "imageUrl": image, "size": size, "format": format,
+        "imageBytesFetched": false, "rightsVerified": false, "ctrEstimated": false
     }))
 }
 fn public_image_url(row: &Value) -> Result<Option<String>, AppError> {
@@ -836,8 +858,14 @@ impl<T: Transport> Discovery<T> {
             return Err(bad_reply());
         }
         let mut cards = Vec::new();
+        let mut seen = HashSet::new();
         for row in images {
-            cards.push(thumbnail_card(universe, size, format, row)?);
+            let card = thumbnail_image_card(universe, size, format, row)?;
+            let thumbnail_id = card["thumbnailId"].as_u64().ok_or_else(bad_reply)?;
+            if !seen.insert(thumbnail_id) {
+                return Err(bad_reply());
+            }
+            cards.push(card);
         }
         Ok(json!({
             "universeId": universe,
@@ -1344,6 +1372,47 @@ mod tests {
         })]);
         let ready = client.icon(77, "150x150", "Png", &mut guard).unwrap();
         assert_eq!(ready["imageUrl"], "https://tr.rbxcdn.com/icon.png");
+
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut client = fake(vec![json!({
+            "data": [{
+                "universeId": 77,
+                "thumbnails": [{
+                    "targetId": 1_538_429_222u64,
+                    "state": "Completed",
+                    "imageUrl": "https://tr.rbxcdn.com/thumb.png"
+                }]
+            }]
+        })]);
+        let images = client
+            .thumbnails(77, "768x432", "Png", 1, &mut guard)
+            .unwrap();
+        assert_eq!(images["universeId"], 77);
+        assert_eq!(images["images"][0]["thumbnailId"], 1_538_429_222u64);
+        assert_eq!(
+            images["images"][0]["imageUrl"],
+            "https://tr.rbxcdn.com/thumb.png"
+        );
+        assert!(images["images"][0].get("targetId").is_none());
+        assert_eq!(client.transport.records[0]["cookieAttached"], false);
+        let mut client = fake(vec![json!({
+            "data": [{
+                "universeId": 99,
+                "thumbnails": [{
+                    "targetId": 77,
+                    "state": "Completed",
+                    "imageUrl": "https://tr.rbxcdn.com/other.png"
+                }]
+            }]
+        })]);
+        assert_eq!(
+            client
+                .thumbnails(77, "768x432", "Png", 1, &mut guard)
+                .unwrap_err()
+                .code,
+            "discovery_response_invalid"
+        );
 
         let mut client = fake(vec![json!({
             "data": [{ "id": 5, "name": "Other", "awardingUniverse": { "id": 99 } }]

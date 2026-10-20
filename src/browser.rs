@@ -451,6 +451,7 @@ fn decode_driver_reply(
         .ok_or_else(|| control_failure(action, phase, Some(status), "invalid_response"))
 }
 
+#[cfg(any(windows, test))]
 fn parse_driver_port(line: &str) -> Option<u16> {
     let rest = line.split("Listening on ").nth(1)?;
     let token = rest.split_whitespace().next()?.trim_end_matches('/');

@@ -43,7 +43,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && inputs.tag || github.sha }}
           persist-credentials: false
+
+      - name: Record the built commit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          REQUIRE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          printf '%s\n' "$sha" > built-commit.txt
+          if [[ "$REQUIRE_TAG" == "true" ]]; then
+            if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "tag is not a plain version" >&2
+              exit 1
+            fi
+            test "$sha" = "$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -84,6 +102,12 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: built-commit-${{ matrix.target_os }}-${{ matrix.arch }}
+          path: built-commit.txt
+          if-no-files-found: error
+
   publish:
     name: Upload existing release
     if: github.event_name == 'workflow_dispatch' && inputs.publish
@@ -97,22 +121,52 @@ jobs:
           ref: ${{ inputs.tag }}
           persist-credentials: false
 
-      - name: Require the existing tag to match Cargo.toml
+      - name: Require the built commit to still be the tag
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "tag is not a plain version" >&2
+            exit 1
+          fi
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
-          test "${{ inputs.tag }}" = "v${version}"
+          test "$RELEASE_TAG" = "v${version}"
+          expected="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          test "$expected" = "$(git rev-parse HEAD)"
 
       - uses: actions/download-artifact@v4
         with:
+          pattern: robcli-*
           path: dist
           merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: built-commit-*
+          path: commits
+
+      - name: Reject archives built from another commit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          expected="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          found=0
+          while IFS= read -r file; do
+            found=$((found + 1))
+            test "$(tr -d '\r\n' < "$file")" = "$expected"
+          done < <(find commits -name built-commit.txt | sort)
+          test "$found" -eq 3
 
       - name: Upload without replacing assets
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          gh release view "${{ inputs.tag }}" --repo "${{ github.repository }}"
-          gh release upload "${{ inputs.tag }}" dist/* --repo "${{ github.repository }}"
+          gh release view "$RELEASE_TAG" --repo "$REPOSITORY"
+          gh release upload "$RELEASE_TAG" dist/* --repo "$REPOSITORY"
