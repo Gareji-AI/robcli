@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.0
+
+- Compare saved JSON snapshots offline, and render one success envelope as
+  Markdown or CSV without fetching Roblox.
+- Read one anonymous game icon, one page of thumbnails, and one page of public
+  badges. Thumbnail image IDs stay distinct from the Universe ID.
+- Read one avatar bundle's typed child IDs. Unknown item types stay unsupported.
+- Add offline `doctor` and `plan`. The plan counts requests and does not send them.
+- Build release archives and SHA-256 checksums for Windows x86_64, Linux x86_64,
+  and macOS aarch64. A checksum is not a publisher signature.
+- Keep Dashboard resource IDs inside the signed 64-bit range.
+- Return exit code 3 for anonymous HTTP refusals, including 429 and 5xx, with no
+  retry and no credential fallback.
+- Send the fixed public query from `groups list`.
+- Return exit code 1 when JSON stdout cannot be written, including argument errors.
+- Prove the loopback driver owns its port before a session cookie is sent.
+- Look up the interactive CSV session cookie from the cookie list. This does not
+  claim that a live CSV export succeeded.
+
 ## 0.6.1
 
 - Adopt the framed, transparent-background project icon and display it in the
