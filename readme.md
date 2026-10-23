@@ -189,7 +189,9 @@ cargo install --path . --locked
 
 Download one approved archive and its `.sha256` file for the same version:
 Windows x86_64 `.zip`, Linux x86_64 `.tar.gz`, macOS aarch64 `.tar.gz`, or
-macOS x86_64 `.tar.gz`.
+macOS x86_64 `.tar.gz`. The Intel archive was added after `0.8.0` and is being
+backfilled onto it; until that lands, use the source build for Intel Macs on
+exactly `0.8.0`.
 Compare the SHA-256 digest before extracting. A match checks the bytes only.
 It does not prove publisher identity, and these archives are not signed or
 notarized. The archive contains `rob` or `rob.exe` plus `license-mit` and
