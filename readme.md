@@ -163,12 +163,6 @@ lookup falls back to scoring the executable suffix and contents instead of an
 exact filename match. Installation works today; matching the repository name
 would remove that fallback.
 
-> [!warning] Intel Macs
-> There is no `macos-x86_64` archive. Rokit 1.2.0 checks the operating system
-> of the downloaded binary but **not** its architecture, so on an Intel Mac
-> `rokit install` reports success and `rob --version` then fails to execute.
-> Use the source build below instead, or omit `rob` from the manifest there.
-
 **Rokit 1.2.0 does not read the `.sha256` sidecar.** If you need integrity
 beyond a pinned version, a GitHub Release, and Rokit's own trust prompt,
 verify the digest yourself as shown under the release archive section.
@@ -194,7 +188,8 @@ cargo install --path . --locked
 ### From a GitHub Release archive
 
 Download one approved archive and its `.sha256` file for the same version:
-Windows x86_64 `.zip`, Linux x86_64 `.tar.gz`, or macOS aarch64 `.tar.gz`.
+Windows x86_64 `.zip`, Linux x86_64 `.tar.gz`, macOS aarch64 `.tar.gz`, or
+macOS x86_64 `.tar.gz`.
 Compare the SHA-256 digest before extracting. A match checks the bytes only.
 It does not prove publisher identity, and these archives are not signed or
 notarized. The archive contains `rob` or `rob.exe` plus `license-mit` and

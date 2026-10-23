@@ -35,9 +35,16 @@ jobs:
             target_os: linux
             arch: x86_64
             binary: rob
-          - os: macos-latest
+          - os: macos-15
             target_os: macos
             arch: aarch64
+            binary: rob
+          # Standard (free) runner on public repos; no -large suffix needed.
+          # Emits macos-x86_64 so Rokit can serve Intel Macs, which it otherwise
+          # cannot detect: Rokit validates OS but not architecture.
+          - os: macos-15-intel
+            target_os: macos
+            arch: x86_64
             binary: rob
     runs-on: ${{ matrix.os }}
     steps:
@@ -159,7 +166,7 @@ jobs:
             found=$((found + 1))
             test "$(tr -d '\r\n' < "$file")" = "$expected"
           done < <(find commits -name built-commit.txt | sort)
-          test "$found" -eq 3
+          test "$found" -eq 4
 
       - name: Upload without replacing assets
         env:
