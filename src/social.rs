@@ -529,13 +529,13 @@ impl<T: Transport> Social<T> {
         );
         page.append(&mut u)?;
         u.query_pairs_mut()
-            .append_pair("accessFilter", "Public")
+            .append_pair("accessFilter", "2")
             .append_pair("sortOrder", "Asc");
         let v: List<Game> = self.read(u, g)?;
         let mut out = paged(v, page.limit, |row| row.card(id, community), "universeId")?;
         out["ownerId"] = id.into();
         out["ownerType"] = if community { "Group" } else { "User" }.into();
-        out["accessFilter"] = "Public".into();
+        out["accessFilter"] = "2".into();
         out["allCreationsVerified"] = false.into();
         Ok(out)
     }
@@ -588,7 +588,7 @@ mod tests {
             "https://groups.roblox.com/v1/groups/42",
             "https://groups.roblox.com/v1/groups/42/roles?includePrivate=false",
             "https://groups.roblox.com/v2/users/77/groups/roles?includeLocked=false&includeNotificationPreferences=false&discoveryType=0",
-            "https://games.roblox.com/v2/groups/42/games?accessFilter=Public&sortOrder=Asc&limit=10",
+            "https://games.roblox.com/v2/groups/42/games?accessFilter=2&sortOrder=Asc&limit=10",
         ] {
             let r = Request::social(Url::parse(s).unwrap()).unwrap();
             assert_eq!(r.snapshot()["method"], "GET");
@@ -600,7 +600,7 @@ mod tests {
             "https://groups.roblox.com/v1/groups/42/audit-log",
             "https://groups.roblox.com/v1/groups/42/users",
             "https://groups.roblox.com/v1/groups/42/roles?includePrivate=true",
-            "https://games.roblox.com/v2/users/77/games?accessFilter=Private&sortOrder=Asc",
+            "https://games.roblox.com/v2/users/77/games?accessFilter=Public&sortOrder=Asc",
             "https://games.roblox.com/v2/users/77/games?sortOrder=Asc",
             "https://users.roblox.com/v1/users/77?Cookie=secret",
             "https://users.roblox.com/v1/users/0",
@@ -742,8 +742,49 @@ mod tests {
                 c.transport.records[0]["url"]
                     .as_str()
                     .unwrap()
-                    .contains("accessFilter=Public")
+                    .contains("accessFilter=2")
             );
+        }
+    }
+    #[test]
+    fn creation_routes_send_the_published_integer_access_filter() {
+        // The Games v2 contract declares accessFilter as an int32 enum with
+        // allowed values 1, 2 and 4. Public-only is 2; `Public` is not a value
+        // in that wire contract.
+        for (community, path) in [(false, "/v2/users/77/games"), (true, "/v2/groups/77/games")] {
+            let root = tempfile::tempdir().unwrap();
+            let mut g = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+            let mut c = client(json!({"data":[]}));
+            let v = c.games(77, community, &page(), &mut g).unwrap();
+            let url = Url::parse(c.transport.records[0]["url"].as_str().unwrap()).unwrap();
+            assert_eq!(url.path(), path);
+            let pairs: Vec<(String, String)> = url
+                .query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+            assert_eq!(
+                pairs
+                    .iter()
+                    .filter(|(key, _)| key == "accessFilter")
+                    .map(|(_, value)| value.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["2"],
+                "constructed URL: {url}"
+            );
+            assert!(
+                pairs
+                    .iter()
+                    .any(|(key, value)| key == "sortOrder" && value == "Asc")
+            );
+            assert_eq!(v["accessFilter"], "2");
+        }
+        // The anonymous request constructor rejects undocumented values.
+        for access in ["Public", "Private", "All", "3", "0", ""] {
+            let url = Url::parse(&format!(
+                "https://games.roblox.com/v2/users/77/games?accessFilter={access}&sortOrder=Asc"
+            ))
+            .unwrap();
+            assert!(Request::social(url).is_err(), "{access}");
         }
     }
     #[test]

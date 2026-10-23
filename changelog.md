@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Send `games thumbnails --count` as the published `countPerUniverse` query, and
+  require that key in the anonymous request allowlist.
+- Report a conservative maximum of five direct attempts for `apikey list --all`,
+  including with `--allow-csrf-handshake`. A one-page listing stays at two or three.
+- Accept the documented `isContentRestricted` game rows that carry an empty name,
+  preserving the flag instead of inventing a name or rejecting the response.
+- Accept the documented nullable Creator Store `asset.name` and keep it null.
+- Return exit code 3 with `httpStatus: 403` for a CSRF 403, including after the one
+  permitted replay. Exit code 2 stays reserved for refusals before a request.
+- Send `accessFilter` as the published `int32` enum value `2` (public) on both
+  creation routes instead of the undocumented enum name `Public`.
+- Accept the documented nullable votes array. A null vote wrapper keeps the game
+  snapshot and leaves the vote totals null; a non-null array still needs exactly
+  one matching row.
+
 ## 0.7.0
 
 - Compare saved JSON snapshots offline, and render one success envelope as

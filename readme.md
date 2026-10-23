@@ -269,7 +269,7 @@ rob games badges --universe 77 --live
 rob avatar bundle --bundle 77 --live
 ```
 
-Icon and thumbnail commands are separate anonymous reads. They return metadata and an `https://*.rbxcdn.com` URL only when the state is `Completed`. Image bytes are not downloaded. Badges are one page. Bundle details keep Asset, Bundle, and UserOutfit IDs in their own namespaces and do not treat them as HumanoidDescription asset IDs.
+Icon and thumbnail commands are separate anonymous reads. `--count` is sent as the published `countPerUniverse` query, not a local `count` key. They return metadata and an `https://*.rbxcdn.com` URL only when the state is `Completed`. Image bytes are not downloaded. Badges are one page. Bundle details keep Asset, Bundle, and UserOutfit IDs in their own namespaces and do not treat them as HumanoidDescription asset IDs.
 
 ### Offline links
 
