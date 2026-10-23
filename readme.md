@@ -134,6 +134,45 @@ credential-like argument values are not echoed. Help/version remain human-readab
 
 ## Install
 
+### Pin the version with Rokit (recommended for Roblox projects)
+
+[Rokit](https://github.com/rojo-rbx/rokit) installs a prebuilt binary from the
+GitHub Release, so there is no Rust toolchain and no native C build environment
+to set up. Pin it next to the rest of the Roblox toolchain:
+
+```toml
+# rokit.toml
+[tools]
+rojo = "rojo-rbx/rojo@7.7.1"
+rob = "eiei114/robcli@0.8.0"
+```
+
+```bash
+rokit install
+rob --version
+```
+
+Rokit's `aftman.toml` and `foreman.toml` compatibility also works. Rokit
+requires an **exact** version; a requirement like `^0.8` is rejected.
+
+The manifest key is the alias and decides the command name, so `rob = ...` is
+what keeps the executable `rob`. Rokit picks the archive by scanning the asset
+name for an OS and an architecture. The archive member is `rob.exe` on Windows
+and `rob` on Linux/macOS. Because the repository is `robcli`, the final member
+lookup falls back to scoring the executable suffix and contents instead of an
+exact filename match. Installation works today; matching the repository name
+would remove that fallback.
+
+> [!warning] Intel Macs
+> There is no `macos-x86_64` archive. Rokit 1.2.0 checks the operating system
+> of the downloaded binary but **not** its architecture, so on an Intel Mac
+> `rokit install` reports success and `rob --version` then fails to execute.
+> Use the source build below instead, or omit `rob` from the manifest there.
+
+**Rokit 1.2.0 does not read the `.sha256` sidecar.** If you need integrity
+beyond a pinned version, a GitHub Release, and Rokit's own trust prompt,
+verify the digest yourself as shown under the release archive section.
+
 ### From crates.io
 
 ```bash
