@@ -53,6 +53,16 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && inputs.tag || github.sha }}
           persist-credentials: false
 
+      # A tag that predates this workflow has no scripts/package-release.py in
+      # its tree, so the packer is taken from the dispatch commit instead. This
+      # is what makes backfilling assets onto an older release possible.
+      - name: Check out packaging tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
       - name: Record the built commit
         shell: bash
         env:
@@ -95,7 +105,7 @@ jobs:
         run: |
           set -euo pipefail
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
-          python scripts/package-release.py \
+          python tooling/scripts/package-release.py \
             --version "$version" \
             --os "${{ matrix.target_os }}" \
             --arch "${{ matrix.arch }}" \
@@ -176,4 +186,27 @@ jobs:
         run: |
           set -euo pipefail
           gh release view "$RELEASE_TAG" --repo "$REPOSITORY"
-          gh release upload "$RELEASE_TAG" dist/* --repo "$REPOSITORY"
+
+          # Upload only assets the release does not already have. A backfill
+          # exists precisely to add one new archive to a release that already
+          # holds the others, and `gh release upload` refuses the whole batch
+          # when any single name already exists.
+          existing="$(gh release view "$RELEASE_TAG" --repo "$REPOSITORY" --json assets --jq '.assets[].name')"
+
+          to_upload=()
+          for file in dist/*; do
+            name="$(basename "$file")"
+            if grep -Fxq "$name" <<< "$existing"; then
+              echo "already present, skipping: $name"
+            else
+              echo "uploading: $name"
+              to_upload+=("$file")
+            fi
+          done
+
+          if [ "${#to_upload[@]}" -eq 0 ]; then
+            echo "nothing to upload; the release already has every asset"
+            exit 0
+          fi
+
+          gh release upload "$RELEASE_TAG" "${to_upload[@]}" --repo "$REPOSITORY"
