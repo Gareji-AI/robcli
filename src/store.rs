@@ -251,7 +251,9 @@ struct AssetReply {
 #[serde(rename_all = "camelCase")]
 struct Asset {
     id: u64,
-    name: String,
+    // The Toolbox Service contract marks Asset.properties.name nullable. An
+    // absent name stays null in the output rather than failing the projection.
+    name: Option<String>,
     description: Option<String>,
     asset_type_id: Option<u32>,
     duration_seconds: Option<u32>,
@@ -332,7 +334,7 @@ pub(crate) fn links(asset: u64) -> Result<Value, AppError> {
 impl AssetReply {
     fn project(self) -> Result<Value, AppError> {
         let asset = self.asset.ok_or_else(bad_reply)?;
-        if asset.id == 0 || asset.id > i64::MAX as u64 || asset.name.trim().is_empty() {
+        if asset.id == 0 || asset.id > i64::MAX as u64 {
             return Err(bad_reply());
         }
         let mut card = links(asset.id)?;
@@ -539,6 +541,53 @@ mod tests {
             store.transport.records[0]["path"],
             "/toolbox-service/v2/assets/77"
         );
+    }
+
+    #[test]
+    fn documented_nullable_asset_names_stay_null() {
+        // Toolbox Service marks Asset.properties.name nullable. A valid asset
+        // with a null name must project, not fail as store_response_invalid.
+        let root = tempfile::tempdir().unwrap();
+        let mut guard =
+            crate::traffic::TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut store = Store::new(FakeTransport {
+            status: 200,
+            challenge: false,
+            records: Vec::new(),
+            body: json!({"asset": { "id": 77, "name": null, "description": null }}),
+        });
+        let value = store.get(77, &mut guard).unwrap();
+        assert_eq!(value["asset"]["name"], Value::Null);
+        assert_eq!(value["assetId"], 77);
+        assert_eq!(store.transport.records.len(), 1);
+
+        // Search uses the same model, so a null name must survive there too.
+        let root = tempfile::tempdir().unwrap();
+        let mut guard =
+            crate::traffic::TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut store = Store::new(FakeTransport {
+            status: 200,
+            challenge: false,
+            records: Vec::new(),
+            body: json!({"creatorStoreAssets": [
+                {"asset": {"id": 77, "name": null}},
+                {"asset": {"id": 88, "name": null, "description": null}}
+            ], "totalResults": 2}),
+        });
+        let output = store
+            .search(
+                &Search {
+                    query: "tree".into(),
+                    kind: AssetKind::Model,
+                    limit: 10,
+                    ..Search::default()
+                },
+                &mut guard,
+            )
+            .unwrap();
+        assert_eq!(output["assets"][0]["asset"]["name"], Value::Null);
+        assert_eq!(output["assets"][1]["asset"]["name"], Value::Null);
+        assert_eq!(store.transport.records.len(), 1);
     }
 
     #[test]

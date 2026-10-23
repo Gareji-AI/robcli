@@ -182,10 +182,15 @@ impl<T: Transport> Api<T> {
                     self.csrf_replayed = true;
                     continue;
                 }
-                return Err(AppError::new(
+                // The request was sent and the provider answered HTTP 403, so
+                // this is an HTTP failure (exit 3) carrying the status, not a
+                // local refusal before any request.
+                return Err(AppError::http(
                     "csrf_required",
                     "Roblox refused the request with a CSRF challenge.",
                     "An explicitly requested --allow-csrf-handshake permits one token-validation replay only; no other retry or authentication bypass is allowed.",
+                    403,
+                    response.retry_after_seconds,
                 ));
             }
             if create
@@ -789,6 +794,31 @@ mod tests {
             twice.keys(None, false, true, &mut guard).unwrap_err().code,
             "csrf_required"
         );
+        assert_eq!(twice.transport.requests.len(), 2);
+    }
+
+    #[test]
+    fn csrf_refusals_are_http_failures_with_the_received_status() {
+        // The provider answered HTTP 403, so the failure carries the status and
+        // exit code 3. Exit code 2 is reserved for refusals before a request.
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut refused = api(vec![csrf()]);
+        let error = refused.keys(None, false, false, &mut guard).unwrap_err();
+        assert_eq!(error.code, "csrf_required");
+        assert_eq!(error.http_status, Some(403));
+        assert_eq!(error.exit_code, 3);
+        assert_eq!(refused.transport.requests.len(), 1);
+        drop(guard);
+
+        // The same applies once the single permitted replay is exhausted.
+        let root = tempfile::tempdir().unwrap();
+        let mut guard = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut twice = api(vec![csrf(), csrf()]);
+        let error = twice.keys(None, false, true, &mut guard).unwrap_err();
+        assert_eq!(error.code, "csrf_required");
+        assert_eq!(error.http_status, Some(403));
+        assert_eq!(error.exit_code, 3);
         assert_eq!(twice.transport.requests.len(), 2);
     }
 

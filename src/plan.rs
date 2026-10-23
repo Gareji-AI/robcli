@@ -388,12 +388,19 @@ fn budget(cli: &Cli) -> Result<Budget, AppError> {
         Command::ApiKey {
             command:
                 ApiKeyCommand::List {
+                    all,
                     allow_csrf_handshake,
                     ..
                 },
         } => (
             session,
-            2 + usize::from(*allow_csrf_handshake),
+            // With --all the listing keeps POSTing while nextCursor is
+            // nonempty, so only the shared run cap is a truthful maximum.
+            if *all {
+                MAX_REQUESTS
+            } else {
+                2 + usize::from(*allow_csrf_handshake)
+            },
             0,
             vec![
                 "GET users.roblox.com/v1/users/authenticated",
@@ -568,6 +575,30 @@ mod tests {
         assert_eq!(
             plan(&["rob", "avatar", "bundle", "--bundle", "77"])["maximumDirectApiAttempts"],
             1
+        );
+    }
+
+    #[test]
+    fn apikey_list_plan_matches_the_paginated_execution_path() {
+        // `apikey list` first verifies the identity, then POSTs list pages.
+        // One page uses two attempts, or three with the CSRF replay gate.
+        assert_eq!(
+            plan(&["rob", "apikey", "list"])["maximumDirectApiAttempts"],
+            2
+        );
+        assert_eq!(
+            plan(&["rob", "apikey", "list", "--allow-csrf-handshake"])["maximumDirectApiAttempts"],
+            3
+        );
+        // `--all` keeps POSTing while nextCursor is nonempty, so only the
+        // shared run cap is a truthful maximum -- with or without the replay.
+        assert_eq!(
+            plan(&["rob", "apikey", "list", "--all"])["maximumDirectApiAttempts"],
+            5
+        );
+        assert_eq!(
+            plan(&["rob", "apikey", "list", "--all", "--allow-csrf-handshake"])["maximumDirectApiAttempts"],
+            5
         );
     }
 

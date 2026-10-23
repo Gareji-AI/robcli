@@ -18,11 +18,11 @@ The documented [Users v1](https://users.roblox.com/docs/json/v1),
 | `users get --user <id>` | `users.roblox.com/v1/users/{id}` | Exact returned ID must match; name/displayName/description/created and optional public flags |
 | `users search --query <text>` | `users.roblox.com/v1/users/search` | keyword, limit, cursor; never claim an exact identity match |
 | `users communities --user <id>` | `groups.roblox.com/v2/users/{id}/groups/roles` | includeLocked=false, includeNotificationPreferences=false, discoveryType=0 |
-| `users games --user <id>` | `games.roblox.com/v2/users/{id}/games` | accessFilter=Public, sortOrder=Asc, limit, cursor |
+| `users games --user <id>` | `games.roblox.com/v2/users/{id}/games` | accessFilter=2 (public), sortOrder=Asc, limit, cursor |
 | `communities get --community <id>` | `groups.roblox.com/v1/groups/{id}` | Exact returned ID must match; optional owner/shout may be null |
 | `communities search --query <text>` | `groups.roblox.com/v1/groups/search` | keyword, limit, cursor |
 | `communities roles --community <id>` | `groups.roblox.com/v1/groups/{id}/roles` | includePrivate=false, matching groupId, no member or permission requests |
-| `communities games --community <id>` | `games.roblox.com/v2/groups/{id}/games` | accessFilter=Public, sortOrder=Asc, limit, cursor |
+| `communities games --community <id>` | `games.roblox.com/v2/groups/{id}/games` | accessFilter=2 (public), sortOrder=Asc, limit, cursor |
 
 All eight live operations make one GET, not a detail/count join. The username
 lookup POST, authenticated user endpoint, audit logs, settings, join requests,
@@ -98,6 +98,8 @@ The public request type cannot carry Cookie/Authorization/API-key/CSRF headers
 or a request body. Host/path/query keys are fixed; duplicate query keys are
 rejected. `includePrivate`, `includeLocked`, notification flags, discovery type,
 `accessFilter` and sort order have fixed values, not arbitrary user overrides.
+`accessFilter` is sent as the published `int32` enum value `2` (public);
+`Public` is not a value in the documented wire contract.
 No Firefox discovery or browser-cookie lookup. The global `--profile` option
 is rejected for all these commands, including offline links.
 

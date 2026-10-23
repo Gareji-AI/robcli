@@ -285,7 +285,7 @@ fn media_url(
             .append_pair("format", format)
             .append_pair("isCircular", "false");
         if let Some(count) = count {
-            query.append_pair("count", &count.to_string());
+            query.append_pair("countPerUniverse", &count.to_string());
         }
     }
     Ok(url)
@@ -584,25 +584,42 @@ impl<T: Transport> Discovery<T> {
             return Err(bad_reply());
         }
         let g: Game = serde_json::from_value(rows[0].clone()).map_err(|_| bad_reply())?;
-        if g.id != id || !valid_id(g.root_place_id) || g.name.trim().is_empty() {
+        if g.id != id || !valid_id(g.root_place_id) {
+            return Err(bad_reply());
+        }
+        // A content-restricted row is documented to carry placeholder or empty
+        // content fields. Preserve the flag and leave the metadata unknown
+        // rather than inventing a name or rejecting a valid response.
+        let restricted = g.is_content_restricted == Some(true);
+        if !restricted && g.name.trim().is_empty() {
             return Err(bad_reply());
         }
         let v = self.read(games_url("/v1/games/votes", id), guard)?;
-        let rows = array(&v, "data")?;
-        if rows.len() != 1 {
-            return Err(bad_reply());
-        }
-        let vote: Votes = serde_json::from_value(rows[0].clone()).map_err(|_| bad_reply())?;
-        if vote.id != id {
-            return Err(bad_reply());
-        }
-        let (total, pct) = like_percent(vote.up_votes, vote.down_votes)?;
+        // The provider marks this wrapper's data as a nullable array. Null means
+        // the vote metadata is unavailable; it does not invalidate the game row.
+        let (up_votes, down_votes) = match v.get("data") {
+            None | Some(Value::Null) => (None, None),
+            Some(_) => {
+                let rows = array(&v, "data")?;
+                if rows.len() != 1 {
+                    return Err(bad_reply());
+                }
+                let vote: Votes =
+                    serde_json::from_value(rows[0].clone()).map_err(|_| bad_reply())?;
+                if vote.id != id {
+                    return Err(bad_reply());
+                }
+                (vote.up_votes, vote.down_votes)
+            }
+        };
+        let (total, pct) = like_percent(up_votes, down_votes)?;
         Ok(
             json!({"universeId":id,"requestedPlaceId":t.place,"rootPlaceId":g.root_place_id,"gameUrl":game_link(g.root_place_id),
             "name":g.name,"description":g.description,"creator":g.creator,"playing":g.playing,"playingScope":"experience/universe, not one server or subplace",
             "visits":g.visits,"favorites":g.favorited_count,"maxPlayersPerServer":g.max_players,"created":g.created,"updated":g.updated,
-            "genre":g.genre,"genreL1":g.genre_l1,"genreL2":g.genre_l2,"paidAccessPriceInRobux":g.price,"isContentRestricted":g.is_content_restricted,
-            "upVotes":vote.up_votes,"downVotes":vote.down_votes,"totalVotes":total,"likePercent":pct,
+            "genre":g.genre,"genreL1":g.genre_l1,"genreL2":g.genre_l2,"paidAccessPriceInRobux":g.price,
+            "isContentRestricted":restricted,"contentRestrictedMetadataUnavailable":restricted,
+            "upVotes":up_votes,"downVotes":down_votes,"totalVotes":total,"likePercent":pct,
             "likePercentFormula":"100 * upVotes / (upVotes + downVotes); null when missing or zero votes",
             "snapshotOnly":true,"playabilityVerified":false,"musicFetched":false,"passesFetched":false,"productsFetched":false}),
         )
@@ -1115,6 +1132,95 @@ mod tests {
         assert!(!v.to_string().contains("discard"));
         assert_eq!(c.transport.records.len(), 2);
     }
+    #[test]
+    fn thumbnail_count_uses_the_published_query_name() {
+        // The official Thumbnails v1 contract names this parameter
+        // `countPerUniverse`; a bare `count` is not a documented key.
+        let url = thumbnail_url(77, "768x432", "Png", 3).unwrap();
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, value)| key == "countPerUniverse" && value == "3"),
+            "constructed URL: {url}"
+        );
+        assert!(!pairs.iter().any(|(key, _)| key == "count"), "{url}");
+        // The allowlist must accept the published key and reject the old one.
+        assert!(Request::game_thumbnail(url).is_ok());
+        let undocumented = Url::parse(
+            "https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds=77&size=768x432&format=Png&isCircular=false&count=3",
+        )
+        .unwrap();
+        assert!(Request::game_thumbnail(undocumented).is_err());
+    }
+
+    #[test]
+    fn content_restricted_rows_keep_the_flag_without_inventing_a_name() {
+        let root = tempfile::tempdir().unwrap();
+        let mut g = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut c = fake(vec![
+            json!({"data":[{"id":77,"rootPlaceId":88,"name":"","isContentRestricted":true}]}),
+            json!({"data":[{"id":77,"upVotes":null,"downVotes":null}]}),
+        ]);
+        let v = c.game(&target(), &mut g).unwrap();
+        assert_eq!(v["isContentRestricted"], true);
+        assert_eq!(v["contentRestrictedMetadataUnavailable"], true);
+        assert_eq!(v["name"], "");
+        assert_eq!(v["description"], Value::Null);
+        assert_eq!(c.transport.records.len(), 2);
+
+        // Without the restriction flag an empty name is still invalid.
+        for restricted in [Value::Null, json!(false)] {
+            let root = tempfile::tempdir().unwrap();
+            let mut g = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+            let mut c = fake(vec![
+                json!({"data":[{"id":77,"rootPlaceId":88,"name":" ","isContentRestricted":restricted}]}),
+            ]);
+            assert_eq!(
+                c.game(&target(), &mut g).unwrap_err().code,
+                "discovery_response_invalid"
+            );
+            assert_eq!(c.transport.records.len(), 1);
+        }
+    }
+
+    #[test]
+    fn nullable_vote_array_keeps_the_game_and_nulls_the_totals() {
+        let root = tempfile::tempdir().unwrap();
+        let mut g = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+        let mut c = fake(vec![
+            json!({"data":[{"id":77,"rootPlaceId":88,"name":"Synthetic"}]}),
+            json!({"data":null}),
+        ]);
+        let v = c.game(&target(), &mut g).unwrap();
+        for key in ["upVotes", "downVotes", "totalVotes", "likePercent"] {
+            assert_eq!(v[key], Value::Null, "{key}");
+        }
+        assert_eq!(v["name"], "Synthetic");
+        assert_eq!(c.transport.records.len(), 2);
+
+        // An array still has to contain exactly one matching row.
+        for rows in [
+            json!({"data":[{"id":99,"upVotes":1,"downVotes":0}]}),
+            json!({"data":[{"id":77,"upVotes":1,"downVotes":0},{"id":77,"upVotes":1,"downVotes":0}]}),
+            json!({"data":[{"id":77,"upVotes":"one","downVotes":0}]}),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut g = TrafficGuard::acquire(root.path(), FakeClock::default()).unwrap();
+            let mut c = fake(vec![
+                json!({"data":[{"id":77,"rootPlaceId":88,"name":"Synthetic"}]}),
+                rows,
+            ]);
+            assert_eq!(
+                c.game(&target(), &mut g).unwrap_err().code,
+                "discovery_response_invalid"
+            );
+        }
+    }
+
     #[test]
     fn zero_votes_are_unknown_not_zero_percent_and_wrong_targets_stop() {
         for (response_id, up, down) in [(77, 0, 0), (99, 3, 1)] {

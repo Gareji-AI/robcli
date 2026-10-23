@@ -214,7 +214,13 @@ impl Request {
         let keys: &[&str] = if icon {
             &["universeIds", "size", "format", "isCircular"]
         } else if thumbs {
-            &["universeIds", "count", "size", "format", "isCircular"]
+            &[
+                "universeIds",
+                "countPerUniverse",
+                "size",
+                "format",
+                "isCircular",
+            ]
         } else {
             return Err(blocked());
         };
@@ -246,7 +252,7 @@ impl Request {
         let count_ok = if thumbs {
             pairs
                 .iter()
-                .find(|(key, _)| key == "count")
+                .find(|(key, _)| key == "countPerUniverse")
                 .and_then(|(_, value)| value.parse::<u32>().ok())
                 .is_some_and(|count| (1..=10).contains(&count))
         } else {
@@ -410,7 +416,9 @@ impl Request {
             ("includeLocked", "false"),
             ("includeNotificationPreferences", "false"),
             ("discoveryType", "0"),
-            ("accessFilter", "Public"),
+            // The published contract declares accessFilter as an int32 enum
+            // (1, 2, 4); 2 is the public-only filter.
+            ("accessFilter", "2"),
             ("sortOrder", "Asc"),
         ] {
             if keys.contains(&key) && !pairs.iter().any(|(k, v)| k == key && v == expected) {

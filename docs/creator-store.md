@@ -64,6 +64,10 @@ Reported fields include name/description, asset ID/type, audio duration/type,
 artist/title/album/genre, SFX category, creator IDs/name/badge, product price and
 currency, script presence/count, preview image/video IDs, timestamps and votes.
 Missing fields remain null, never fabricated as free, scriptless, owned or usable.
+`asset.name` is `nullable` in the Toolbox Service contract, so a valid asset with
+a null name is projected with `asset.name: null` instead of failing the response.
+Invalid or out-of-range asset IDs, and a detail ID that differs from the
+requested one, still fail.
 `purchasePrice.quantity` is preserved as `significand` and `exponent`; no invented
 currency conversion is applied.
 
