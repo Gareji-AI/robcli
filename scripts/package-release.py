@@ -10,6 +10,7 @@ APPROVED = {
     ("windows", "x86_64"): ("rob.exe", "zip"),
     ("linux", "x86_64"): ("rob", "tar.gz"),
     ("macos", "aarch64"): ("rob", "tar.gz"),
+    ("macos", "x86_64"): ("rob", "tar.gz"),
 }
 LICENSES = ("license-mit", "license-apache")
 
@@ -42,8 +43,12 @@ def main() -> None:
     args = parser.parse_args()
     try:
         name, binary_name = archive_name(args.version, args.system, args.arch)
-    except (KeyError, ValueError) as error:
-        raise SystemExit(str(error) or "target is outside the approved archive matrix") from error
+    except KeyError:
+        raise SystemExit(
+            f"target {args.system}/{args.arch} is outside the approved archive matrix"
+        ) from None
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     if args.binary.name != binary_name or not args.binary.is_file():
         raise SystemExit("binary name is outside the approved archive member list")
     licenses = [args.licenses / item for item in LICENSES]
@@ -64,7 +69,9 @@ def main() -> None:
                 archive.add(path, arcname=path.name)
     digest = hashlib.sha256(destination.read_bytes()).hexdigest()
     checksum = args.out / f"{name}.sha256"
-    checksum.write_text(f"{digest}  {name}\n", encoding="utf-8")
+    # Pin the newline so the file stays `sha256sum -c` compatible on every host.
+    with checksum.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(f"{digest}  {name}\n")
     print(checksum)
 
 
