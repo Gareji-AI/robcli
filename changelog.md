@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0
 
 - Send `games thumbnails --count` as the published `countPerUniverse` query, and
   require that key in the anonymous request allowlist.
