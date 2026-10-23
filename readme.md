@@ -157,10 +157,11 @@ requires an **exact** version; a requirement like `^0.8` is rejected.
 
 The manifest key is the alias and decides the command name, so `rob = ...` is
 what keeps the executable `rob`. Rokit picks the archive by scanning the asset
-name for an OS and an architecture. The archive member is `rob` while the
-repository is `robcli`, so the final member lookup falls back to scoring
-executable suffix and contents instead of an exact filename match. Installation
-works today; matching the repository name would remove that fallback.
+name for an OS and an architecture. The archive member is `rob.exe` on Windows
+and `rob` on Linux/macOS. Because the repository is `robcli`, the final member
+lookup falls back to scoring the executable suffix and contents instead of an
+exact filename match. Installation works today; matching the repository name
+would remove that fallback.
 
 > [!warning] Intel Macs
 > There is no `macos-x86_64` archive. Rokit 1.2.0 checks the operating system
