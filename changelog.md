@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.1
+
+Distribution-only patch. No CLI behavior, command surface, API contract, or
+credential handling changed; the crate contents differ only in the version,
+this changelog, and the release-archive docs.
+
+- Document installing through Rokit, so a Roblox project can pin `rob` next to
+  `rojo` and `stylua` instead of requiring Rust 1.99 and a native C toolchain.
+- Add a `macos-x86_64` archive. Rokit validates the operating system of a
+  downloaded binary but not its architecture, so an Intel Mac previously
+  installed the aarch64 build, reported success, and then could not execute.
+- Write the `.sha256` sidecar with an explicit newline. Text mode emitted CRLF
+  on Windows, which broke `sha256sum -c`.
+- Report the target name for an unapproved archive target, instead of a raw
+  `KeyError` repr.
+- Package only the assets a release does not already contain, and take the
+  packager from the dispatch commit rather than the release tag. A tag that
+  predates the packaging script otherwise fails before building anything.
+
+Approved archive matrix: Windows x86_64 (`.zip`), Linux x86_64 (`.tar.gz`),
+macOS aarch64 (`.tar.gz`), macOS x86_64 (`.tar.gz`).
+
 ## 0.8.0
 
 - Send `games thumbnails --count` as the published `countPerUniverse` query, and

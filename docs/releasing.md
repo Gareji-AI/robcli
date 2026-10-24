@@ -41,7 +41,10 @@ test an install from crates.io into a separate temporary root and run only
 offline help/schema/link commands.
 
 Binary archives are separate from the crates.io package. The approved matrix is
-Windows x86_64 (`.zip`), Linux x86_64 (`.tar.gz`), and macOS aarch64 (`.tar.gz`).
+Windows x86_64 (`.zip`), Linux x86_64 (`.tar.gz`), macOS aarch64 (`.tar.gz`), and
+macOS x86_64 (`.tar.gz`). The Intel archive matters because Rokit validates the
+OS of a downloaded binary but not its architecture, so publishing only aarch64
+installs successfully on an Intel Mac and then fails to execute.
 Each archive contains only `rob` or `rob.exe`, `license-mit`, and `license-apache`.
 SHA-256 checksums identify the bytes. They do not prove publisher identity.
 
