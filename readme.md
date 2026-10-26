@@ -1,10 +1,10 @@
 # robcli
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/eiei114/robcli/main/assets/icon.png" alt="robcli icon" width="160" height="160">
+  <img src="https://raw.githubusercontent.com/Gareji-AI/robcli/main/assets/icon.png" alt="robcli icon" width="160" height="160">
 </p>
 
-[![CI](https://github.com/eiei114/robcli/actions/workflows/ci.yml/badge.svg)](https://github.com/eiei114/robcli/actions/workflows/ci.yml)
+[![CI](https://github.com/Gareji-AI/robcli/actions/workflows/ci.yml/badge.svg)](https://github.com/Gareji-AI/robcli/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/robcli.svg)](https://crates.io/crates/robcli)
 [![Downloads](https://img.shields.io/crates/d/robcli.svg)](https://crates.io/crates/robcli)
 [![License](https://img.shields.io/crates/l/robcli.svg)](#license)
@@ -21,7 +21,7 @@ read a community, or discover Dashboard commands without opening a browser or
 guessing an API. `robcli` provides typed commands, JSON output and explicit
 network boundaries for that work.
 
-It complements [`rbxoc`](https://github.com/eiei114/rbxoc), rather than replacing it:
+It complements [`rbxoc`](https://github.com/Gareji-AI/rbxoc), rather than replacing it:
 
 | Tool | Main job | Authentication |
 | --- | --- | --- |
@@ -144,7 +144,7 @@ to set up. Pin it next to the rest of the Roblox toolchain:
 # rokit.toml
 [tools]
 rojo = "rojo-rbx/rojo@7.7.1"
-rob = "eiei114/robcli@0.8.0"
+rob = "Gareji-AI/robcli@0.8.0"
 ```
 
 ```bash
@@ -180,7 +180,7 @@ The installed executable is `rob`, not `robcli`. Node.js is not a runtime depend
 ### From source
 
 ```bash
-git clone https://github.com/eiei114/robcli.git
+git clone https://github.com/Gareji-AI/robcli.git
 cd robcli
 cargo install --path . --locked
 ```
